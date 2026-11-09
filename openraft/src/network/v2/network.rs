@@ -205,6 +205,17 @@ where C: RaftTypeConfig
         option: RPCOption,
     ) -> Result<SnapshotResponse<C>, StreamingError<C>>;
 
+    /// Admit a snapshot transmission before its snapshot is read.
+    ///
+    /// Openraft calls this before it asks the state machine for the snapshot it then sends with
+    /// [`full_snapshot()`](Self::full_snapshot), so the network can reserve what sending it
+    /// holds, the snapshot's metadata among it, before the state machine makes that metadata.
+    /// An error is handled as one returned by `full_snapshot()`. The default admits at once.
+    #[since(version = "0.10.0")]
+    async fn admit_snapshot(&mut self) -> Result<(), StreamingError<C>> {
+        Ok(())
+    }
+
     /// Send TransferLeader message to the target node.
     ///
     /// The node received this message should pass it to [`Raft::handle_transfer_leader()`].
@@ -314,6 +325,10 @@ where
         option: RPCOption,
     ) -> Result<SnapshotResponse<C>, StreamingError<C>> {
         RaftNetworkV2::full_snapshot(self, vote, snapshot, cancel, option).await
+    }
+
+    async fn admit_snapshot(&mut self) -> Result<(), StreamingError<C>> {
+        RaftNetworkV2::admit_snapshot(self).await
     }
 }
 

@@ -200,6 +200,16 @@ where
     }
 
     async fn read_and_send_snapshot(&mut self, ith: i32) -> Result<(), ReplicationError<C>> {
+        // The network reserves what sending the snapshot holds before the state machine makes it.
+        let mut c = self.replication_context.cancel_rx.clone();
+        let cancel = async move {
+            c.changed().await.ok();
+        };
+        match C::select2(self.network.admit_snapshot(), cancel).await {
+            Select2::First(admitted) => admitted?,
+            Select2::Second(_) => return Err(ReplicationClosed::new("RaftCore is dropped").into()),
+        }
+
         let snapshot = self.snapshot_reader.get_snapshot().await.map_err(|reason| {
             tracing::warn!("failed to get snapshot from state machine: {}", reason);
             ReplicationClosed::new(reason)
@@ -230,7 +240,8 @@ where
         snapshot: SmSnapshotOf<C, SM>,
         option: RPCOption,
     ) -> Result<(), ReplicationError<C>> {
-        let meta = snapshot.meta.clone();
+        // Only the log id is kept, not a copy of the metadata's membership for the whole send.
+        let last_log_id = snapshot.meta.last_log_id.clone();
 
         let mut c = self.replication_context.cancel_rx.clone();
         let cancel = async move {
@@ -256,7 +267,7 @@ where
 
         self.replication_context.notify_heartbeat_progress(start_time).await;
         self.replication_context
-            .notify_progress(Ok(ReplicationResult(Ok(meta.last_log_id))), Some(self.inflight_id))
+            .notify_progress(Ok(ReplicationResult(Ok(last_log_id))), Some(self.inflight_id))
             .await;
         Ok(())
     }
