@@ -28,6 +28,7 @@ use crate::storage::StorageHelper;
 use crate::testing::log::StoreBuilder;
 use crate::type_config::TypeConfigExt;
 use crate::type_config::alias::LeaderIdOf;
+use crate::type_config::alias::LogEntriesOf;
 use crate::type_config::alias::LogIdOf;
 use crate::type_config::alias::StoredMembershipOf;
 use crate::type_config::alias::TermOf;
@@ -70,7 +71,7 @@ where C: RaftTypeConfig
     async fn try_get_log_entries<RB: RangeBounds<u64> + Clone + Debug + OptionalSend>(
         &mut self,
         range: RB,
-    ) -> Result<Vec<C::Entry>, io::Error> {
+    ) -> Result<LogEntriesOf<C>, io::Error> {
         self.get_log_reader().await.try_get_log_entries(range).await
     }
 
@@ -80,7 +81,7 @@ where C: RaftTypeConfig
     }
 
     /// Proxy method to invoke [`RaftLogReader::limited_get_log_entries`].
-    async fn limited_get_log_entries(&mut self, start: u64, end: u64) -> Result<Vec<C::Entry>, io::Error> {
+    async fn limited_get_log_entries(&mut self, start: u64, end: u64) -> Result<LogEntriesOf<C>, io::Error> {
         self.get_log_reader().await.limited_get_log_entries(start, end).await
     }
 }

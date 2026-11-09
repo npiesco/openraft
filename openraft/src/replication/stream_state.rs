@@ -20,9 +20,10 @@ use crate::replication::backoff_consumer::BackoffConsumer;
 use crate::replication::event_watcher::EventWatcher;
 use crate::replication::payload::Payload;
 use crate::replication::replication_context::ReplicationContext;
+use crate::storage::LogEntries;
 use crate::storage::RaftLogStorage;
 use crate::type_config::TypeConfigExt;
-use crate::type_config::alias::EntryOf;
+use crate::type_config::alias::LogEntriesOf;
 use crate::type_config::alias::LogIdOf;
 
 /// Mutable state for generating AppendEntries requests in a replication stream.
@@ -210,7 +211,7 @@ where
     async fn read_log_entries(
         &mut self,
         log_id_range: LogIdRange<C>,
-    ) -> Result<(Vec<EntryOf<C>>, LogIdRange<C>), StorageError<C>> {
+    ) -> Result<(LogEntriesOf<C>, LogIdRange<C>), StorageError<C>> {
         tracing::debug!("read_log_entries: log_id_range: {}", log_id_range);
 
         // Series of logs to send, and the last log id to send
@@ -232,7 +233,7 @@ where
             );
             // Heartbeat RPC, no logs to send, last log id is the same as prev_log_id
             let r = LogIdRange::new(rng.prev.clone(), rng.prev.clone());
-            Ok((vec![], r))
+            Ok((LogEntries::default(), r))
         } else {
             let max_entries = self.replication_context.config.max_payload_entries;
             let end = std::cmp::min(end, start + max_entries);
@@ -255,7 +256,7 @@ where
                 );
                 C::sleep(sleep_duration).await;
                 let r = LogIdRange::new(rng.prev.clone(), rng.prev.clone());
-                return Ok((vec![], r));
+                return Ok((LogEntries::default(), r));
             }
 
             let first = logs.first().map(|ent| ent.ref_log_id()).unwrap();

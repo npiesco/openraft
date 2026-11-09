@@ -111,7 +111,7 @@ where
                 // following line to `prev_log_id = heartbeat.cluster_committed.clone()`.
                 prev_log_id: heartbeat.matching.clone(),
                 leader_commit: heartbeat.cluster_committed.clone(),
-                entries: vec![],
+                entries: Default::default(),
             };
 
             let input_stream = Box::pin(futures_util::stream::once(async { payload }));

@@ -168,6 +168,15 @@ pub trait RaftTypeConfig:
     ///
     /// See [`ErrorSource`] for the required methods.
     type ErrorSource: ErrorSource;
+
+    /// What accounts for the memory of log entries a [`RaftLogReader`] returns, kept with them
+    /// in [`LogEntries`] until their buffer is freed.
+    ///
+    /// The default, `()`, accounts for nothing.
+    ///
+    /// [`RaftLogReader`]: crate::storage::RaftLogReader
+    /// [`LogEntries`]: crate::storage::LogEntries
+    type EntriesOwner: OptionalSend + OptionalSync + 'static;
 }
 
 #[allow(dead_code)]
@@ -203,6 +212,7 @@ pub mod alias {
     #[since(version = "0.10.0")]
     pub type PayloadOf<C> = <C as RaftTypeConfig>::Payload;
     pub type EntryOf<C> = <C as RaftTypeConfig>::Entry;
+    pub type LogEntriesOf<C> = crate::storage::LogEntries<EntryOf<C>, <C as RaftTypeConfig>::EntriesOwner>;
     pub type SnapshotDataOf<C, SM> = <SM as RaftStateMachine<C>>::SnapshotData;
     pub type AsyncRuntimeOf<C> = <C as RaftTypeConfig>::AsyncRuntime;
     pub type ResponderOf<C, T> = <C as RaftTypeConfig>::Responder<T>;

@@ -16,6 +16,7 @@ use crate::errors::LeaderChanged;
 use crate::type_config::alias::CommittedLeaderIdOf;
 use crate::type_config::alias::EntryOf;
 use crate::type_config::alias::LeaderIdOf;
+use crate::type_config::alias::LogEntriesOf;
 use crate::type_config::alias::LogIdOf;
 use crate::type_config::alias::VoteOf;
 use crate::vote::RaftVote;
@@ -218,12 +219,16 @@ where C: RaftTypeConfig
     /// - The read operation must be atomic. That is, it should not reflect any state changes that
     ///   occur after the read operation has started.
     ///
+    /// - The entries are returned with whatever accounts for their memory, if anything; see
+    ///   [`LogEntries`]. A `Vec` converts with `.into()`.
+    ///
+    /// [`LogEntries`]: crate::storage::LogEntries
     /// [`RaftLogStorage::append`]: crate::storage::RaftLogStorage::append
     /// [`RaftLogStorage::purge`]: crate::storage::RaftLogStorage::purge
     async fn try_get_log_entries<RB: RangeBounds<u64> + Clone + Debug + OptionalSend>(
         &mut self,
         range: RB,
-    ) -> Result<Vec<C::Entry>, io::Error>;
+    ) -> Result<LogEntriesOf<C>, io::Error>;
 
     /// Return the last saved vote by [`RaftLogStorage::save_vote`].
     ///
@@ -243,7 +248,7 @@ where C: RaftTypeConfig
     ///
     /// The default implementation just returns the full range of log entries.
     #[since(version = "0.10.0")]
-    async fn limited_get_log_entries(&mut self, start: u64, end: u64) -> Result<Vec<C::Entry>, io::Error> {
+    async fn limited_get_log_entries(&mut self, start: u64, end: u64) -> Result<LogEntriesOf<C>, io::Error> {
         self.try_get_log_entries(start..end).await
     }
 
@@ -325,10 +330,13 @@ mod tests {
     }
 
     impl RaftLogReader<UTConfig> for ChangingVoteReader {
-        async fn try_get_log_entries<RB>(&mut self, _range: RB) -> Result<Vec<EntryOf<UTConfig>>, std::io::Error>
+        async fn try_get_log_entries<RB>(
+            &mut self,
+            _range: RB,
+        ) -> Result<crate::storage::LogEntries<EntryOf<UTConfig>>, std::io::Error>
         where RB: std::ops::RangeBounds<u64> + Clone + std::fmt::Debug + crate::OptionalSend {
             self.calls.push("read_entries");
-            Ok(self.entries.clone())
+            Ok(self.entries.clone().into())
         }
 
         async fn read_vote(&mut self) -> Result<Option<VoteOf<UTConfig>>, std::io::Error> {

@@ -53,6 +53,7 @@ where N: Node + Ord
         = crate::impls::InlineBatch<T>
     where T: OptionalSend + 'static;
     type ErrorSource = anyerror::AnyError;
+    type EntriesOwner = ();
 }
 
 /// Type alias for the LeaderId used in unit tests.

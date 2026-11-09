@@ -211,7 +211,7 @@ Most of the APIs are quite straightforward, except two indirect APIs:
     ```text
     // Abbreviated; see `RaftLogReader` for the full signature.
     trait RaftLogReader<C: RaftTypeConfig> {
-        async fn try_get_log_entries<RB: RangeBounds<u64>>(&mut self, range: RB) -> Result<Vec<C::Entry>, ..>;
+        async fn try_get_log_entries<RB: RangeBounds<u64>>(&mut self, range: RB) -> Result<LogEntries<C::Entry>, ..>;
         async fn read_vote(&mut self) -> Result<Option<Vote<C::NodeId>>, ..>;
     }
     ```

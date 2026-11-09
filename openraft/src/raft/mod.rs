@@ -249,6 +249,7 @@ macro_rules! declare_raft_types {
                 (Batch<T>       , , $crate::impls::InlineBatch<T> where T: $crate::OptionalSend + 'static     ),
                 (AsyncRuntime   , , $crate::impls::TokioRuntime                  ),
                 (ErrorSource    , , $crate::impls::BoxedErrorSource               ),
+                (EntriesOwner   , , ()                                           ),
             );
 
         }

@@ -6,6 +6,7 @@ use display_more::DisplaySliceExt;
 use crate::RaftTypeConfig;
 use crate::entry::RaftEntry;
 use crate::log_id_range::LogIdRange;
+use crate::storage::LogEntries;
 use crate::type_config::alias::LogIdOf;
 use crate::type_config::alias::VoteOf;
 
@@ -28,8 +29,9 @@ pub struct AppendEntriesRequest<C: RaftTypeConfig> {
     /// The new log entries to store.
     ///
     /// This may be empty when the leader is sending heartbeats. Entries
-    /// are batched for efficiency.
-    pub entries: Vec<C::Entry>,
+    /// are batched for efficiency, and kept with the owner of their memory, if any: see
+    /// [`LogEntries`].
+    pub entries: LogEntries<C::Entry, C::EntriesOwner>,
 
     /// The leader's cluster-committed log id: the quorum-granted commit frontier.
     ///

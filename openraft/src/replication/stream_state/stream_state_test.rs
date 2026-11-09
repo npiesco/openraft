@@ -21,6 +21,7 @@ use crate::replication::payload::Payload;
 use crate::replication::replicate::Replicate;
 use crate::replication::replication_context::ReplicationContext;
 use crate::storage::IOFlushed;
+use crate::storage::LogEntries;
 use crate::storage::LogState;
 use crate::storage::RaftLogStorage;
 use crate::type_config::TypeConfigExt;
@@ -36,15 +37,19 @@ struct PrefixStore {
 }
 
 impl RaftLogReader<UTConfig> for PrefixStore {
-    async fn limited_get_log_entries(&mut self, start: u64, end: u64) -> Result<Vec<EntryOf<UTConfig>>, io::Error> {
+    async fn limited_get_log_entries(
+        &mut self,
+        start: u64,
+        end: u64,
+    ) -> Result<LogEntries<EntryOf<UTConfig>>, io::Error> {
         self.reads.push((start, end));
         if std::mem::take(&mut self.empty_first) {
-            return Ok(vec![]);
+            return Ok(LogEntries::default());
         }
-        Ok(vec![EntryOf::<UTConfig>::new_blank(log_id(1, 1, start))])
+        Ok(vec![EntryOf::<UTConfig>::new_blank(log_id(1, 1, start))].into())
     }
 
-    async fn try_get_log_entries<R>(&mut self, _range: R) -> Result<Vec<EntryOf<UTConfig>>, io::Error>
+    async fn try_get_log_entries<R>(&mut self, _range: R) -> Result<LogEntries<EntryOf<UTConfig>>, io::Error>
     where R: RangeBounds<u64> + Clone + Debug + OptionalSend {
         unreachable!("replication should use limited_get_log_entries")
     }
@@ -145,7 +150,7 @@ fn probe_stops_after_storage_limited_prefix() {
                 } else {
                     vec![EntryOf::<UTConfig>::new_blank(log_id(1, 1, 53))]
                 };
-                assert_eq!(expected_entries, request.entries);
+                assert_eq!(expected_entries, request.entries[..]);
                 assert_eq!(vec![(53, 61)], state.log_reader.reads);
                 assert_eq!(None, state.payload.as_ref());
             }

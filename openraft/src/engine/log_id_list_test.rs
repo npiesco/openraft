@@ -30,7 +30,7 @@ impl RaftLogReader<UTConfig> for MockLogReader {
     async fn try_get_log_entries<RNG>(
         &mut self,
         range: RNG,
-    ) -> Result<Vec<<UTConfig as crate::RaftTypeConfig>::Entry>, std::io::Error>
+    ) -> Result<crate::storage::LogEntries<<UTConfig as crate::RaftTypeConfig>::Entry>, std::io::Error>
     where
         RNG: std::ops::RangeBounds<u64> + Clone + std::fmt::Debug + crate::OptionalSend,
     {
@@ -55,7 +55,7 @@ impl RaftLogReader<UTConfig> for MockLogReader {
                 entries.push(crate::type_config::alias::EntryOf::<UTConfig>::new_blank(*log_id));
             }
         }
-        Ok(entries)
+        Ok(entries.into())
     }
 
     async fn read_vote(&mut self) -> Result<Option<<UTConfig as crate::RaftTypeConfig>::Vote>, std::io::Error> {

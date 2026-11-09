@@ -27,6 +27,7 @@
 
 mod callback;
 mod helper;
+mod log_entries;
 mod log_reader_ext;
 mod log_state;
 mod snapshot;
@@ -39,6 +40,8 @@ pub use self::callback::LogApplied;
 #[allow(deprecated)]
 pub use self::callback::LogFlushed;
 pub use self::helper::StorageHelper;
+pub use self::log_entries::LogEntries;
+pub use self::log_entries::LogEntriesIter;
 pub use self::log_reader_ext::RaftLogReaderExt;
 pub use self::log_state::LogState;
 pub use self::snapshot::Snapshot;

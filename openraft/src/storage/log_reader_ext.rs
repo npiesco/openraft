@@ -17,8 +17,8 @@ where C: RaftTypeConfig
     ///
     /// It does not return an error if the log entry at `log_index` is not found.
     async fn try_get_log_entry(&mut self, log_index: u64) -> Result<Option<C::Entry>, StorageError<C>> {
-        let mut res = self.try_get_log_entries(log_index..(log_index + 1)).await.sto_read_logs()?;
-        Ok(res.pop())
+        let res = self.try_get_log_entries(log_index..(log_index + 1)).await.sto_read_logs()?;
+        Ok(res.into_iter().next_back())
     }
 
     /// Get the log id of the entry at `index`.

@@ -1701,7 +1701,10 @@ where
     pub(super) fn handle_append_entries_request(&mut self, req: AppendEntriesRequest<C>, tx: AppendEntriesTx<C>) {
         tracing::debug!("{}: req: {}", func_name!(), req);
 
-        let segment = LogSegment::new(req.prev_log_id, req.entries);
+        // The core keeps entries as a bare `Vec`: an owner attached to a received request's entries
+        // is released here, before the entries are freed. Entries decoded from the network have none.
+        let (entries, _owner) = req.entries.into_parts();
+        let segment = LogSegment::new(req.prev_log_id, entries);
         self.engine.handle_append_entries(&req.vote, segment, tx);
 
         // Record append entries to external metrics recorder

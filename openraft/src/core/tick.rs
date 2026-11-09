@@ -246,6 +246,7 @@ mod tests {
             = crate::impls::InlineBatch<T>
         where T: OptionalSend + 'static;
         type ErrorSource = anyerror::AnyError;
+        type EntriesOwner = ();
     }
 
     /// A runtime whose `thread_rng()` is seeded, so sampled first waits are reproducible.
