@@ -6,6 +6,7 @@
 //!
 //! - [`Membership`] - Cluster membership configuration (voters and learners)
 //! - [`StoredMembership`] - Membership state stored in state machine
+//! - [`MembershipOwner`] - What accounts for the memory of a membership storage returns
 //! - [`IntoNodes`] - Trait for converting node sets with metadata
 //!
 //! ## Overview
@@ -24,6 +25,7 @@ mod into_nodes;
 #[allow(clippy::module_inception)]
 mod membership;
 mod membership_impl_quorum_set;
+mod membership_owner;
 mod stored_membership;
 
 #[cfg(test)]
@@ -33,4 +35,5 @@ mod stored_membership_test;
 
 pub use into_nodes::IntoNodes;
 pub use membership::Membership;
+pub use membership_owner::MembershipOwner;
 pub use stored_membership::StoredMembership;

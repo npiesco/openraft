@@ -15,7 +15,7 @@ where
 
     fn is_quorum<'a, I>(&self, ids: I) -> bool
     where I: Iterator<Item = &'a NID> + Clone {
-        for config in &self.configs {
+        for config in &self.members().configs {
             if !config.is_quorum(ids.clone()) {
                 return false;
             }
@@ -25,7 +25,7 @@ where
 
     fn ids(&self) -> Self::Iter {
         let mut ids = BTreeSet::new();
-        for config in &self.configs {
+        for config in &self.members().configs {
             ids.extend(config.iter().cloned());
         }
         ids.into_iter()
@@ -47,10 +47,7 @@ mod tests {
     fn test_membership_is_quorum() -> anyhow::Result<()> {
         // Single config: simple majority.
         {
-            let m12345 = Membership::<u64, ()> {
-                configs: vec![btreeset! {1,2,3,4,5}],
-                nodes: btreemap! {},
-            };
+            let m12345 = Membership::<u64, ()>::new_unchecked(vec![btreeset! {1,2,3,4,5}], btreemap! {});
 
             assert!(!m12345.is_quorum([0].iter()));
             assert!(!m12345.is_quorum([0, 1, 2].iter()));
@@ -62,10 +59,10 @@ mod tests {
 
         // Joint config: must be a majority in every config.
         {
-            let m12345_678 = Membership::<u64, ()> {
-                configs: vec![btreeset! {1,2,3,4,5}, btreeset! {6,7,8}],
-                nodes: btreemap! {},
-            };
+            let m12345_678 = Membership::<u64, ()>::new_unchecked(
+                vec![btreeset! {1,2,3,4,5}, btreeset! {6,7,8}],
+                btreemap! {},
+            );
 
             assert!(!m12345_678.is_quorum([0].iter()));
             assert!(!m12345_678.is_quorum([0, 1, 2].iter()));
@@ -80,10 +77,10 @@ mod tests {
 
     #[test]
     fn test_membership_ids() -> anyhow::Result<()> {
-        let m12345_678 = Membership::<u64, ()> {
-            configs: vec![btreeset! {1,2,3,4,5}, btreeset! {4,5,6,7,8}],
-            nodes: btreemap! {},
-        };
+        let m12345_678 = Membership::<u64, ()>::new_unchecked(
+            vec![btreeset! {1,2,3,4,5}, btreeset! {4,5,6,7,8}],
+            btreemap! {},
+        );
 
         assert_eq!(btreeset! {1,2,3,4,5,6,7,8}, m12345_678.ids().collect());
 
