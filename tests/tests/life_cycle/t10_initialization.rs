@@ -110,7 +110,6 @@ async fn initialization() -> anyhow::Result<()> {
                     Some(log_id(0, 0, 0)),
                     Membership::new_with_defaults(vec![btreeset! {0,1,2}], []),
                 );
-                let want = Arc::new(want);
                 assert_eq!(
                     s.membership_state.effective(),
                     &want,
