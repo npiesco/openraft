@@ -21,6 +21,7 @@ use crate::async_runtime::AsyncRuntime;
 use crate::async_runtime::Charge;
 use crate::async_runtime::Charged;
 use crate::async_runtime::Funder;
+use crate::async_runtime::Mpsc;
 use crate::async_runtime::Oneshot;
 use crate::async_runtime::watch::Watch;
 use crate::engine::TargetProgress;
@@ -34,6 +35,9 @@ use crate::type_config::TypeConfigExt;
 use crate::type_config::alias::AsyncRuntimeOf;
 use crate::type_config::alias::InstantOf;
 use crate::type_config::alias::JoinHandleOf;
+use crate::type_config::alias::MpscOf;
+use crate::type_config::alias::MpscReceiverOf;
+use crate::type_config::alias::MpscSenderOf;
 use crate::type_config::alias::OneshotOf;
 use crate::type_config::alias::OneshotReceiverOf;
 use crate::type_config::alias::OneshotSenderOf;
@@ -227,6 +231,19 @@ where
         let block = WatchOf::<C>::block_bytes::<U>().ok_or(Unfunded)?;
         let charge = self.split(block)?.ok_or(Unfunded)?;
         WatchOf::<C>::charged_channel(charge, init).map_err(|_| Unfunded)
+    }
+
+    /// A bounded channel of `buffer` values the task holds, everything it allocates in its life
+    /// made now and funded by its share of the charge, held until every handle is dropped and all
+    /// of it is freed: refused as [`Unfunded`], nothing made, if the charge holds too few.
+    pub(crate) fn mpsc<U>(&mut self, buffer: usize) -> Result<(MpscSenderOf<C, U>, MpscReceiverOf<C, U>), Unfunded>
+    where U: OptionalSend {
+        if self.charge.is_none() {
+            return Ok(C::mpsc(buffer));
+        }
+        let block = MpscOf::<C>::block_bytes::<U>(buffer).ok_or(Unfunded)?;
+        let charge = self.split(block)?.ok_or(Unfunded)?;
+        MpscOf::<C>::charged_channel(charge, buffer).map_err(|_| Unfunded)
     }
 
     /// Spawns `future`, everything the runtime allocates for the task funded by its share of the

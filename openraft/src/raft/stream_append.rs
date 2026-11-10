@@ -14,8 +14,10 @@ use crate::raft::AppendEntriesRequest;
 use crate::raft::StreamAppendError;
 use crate::raft::raft_inner::RaftInner;
 use crate::type_config::alias::LogIdOf;
+use crate::type_config::alias::MpscOf;
 use crate::type_config::alias::MpscReceiverOf;
 use crate::type_config::alias::OneshotReceiverOf;
+use crate::type_config::async_runtime::Mpsc;
 use crate::type_config::async_runtime::MpscReceiver;
 use crate::type_config::async_runtime::MpscSender;
 use crate::type_config::util::TypeConfigExt;
@@ -78,8 +80,8 @@ where
 }
 
 /// Spawns the task that sends `input`'s requests to RaftCore, charged to the node's funder before
-/// anything of it is made, and returns the receiver of their answers' channels: refused as
-/// [`Unfunded`], nothing made and `input` dropped.
+/// anything of it is made, the channel it sends their answers' channels on included, and returns
+/// that channel's receiver: refused as [`Unfunded`], nothing made and `input` dropped.
 fn pipeline<C, S>(
     inner: Arc<RaftInner<C>>,
     input: S,
@@ -88,9 +90,9 @@ where
     C: RaftTypeConfig,
     S: Stream<Item = AppendEntriesRequest<C>> + OptionalSend + 'static,
 {
-    let task = inner.task_charge(|| Some(0))?;
+    let mut task = inner.task_charge(|| MpscOf::<C>::block_bytes::<Pending<C>>(PIPELINE_BUFFER_SIZE))?;
 
-    let (tx, rx) = C::mpsc::<Pending<C>>(PIPELINE_BUFFER_SIZE);
+    let (tx, rx) = task.mpsc::<Pending<C>>(PIPELINE_BUFFER_SIZE)?;
 
     let unfold_inner = inner.clone();
 

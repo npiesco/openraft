@@ -11,6 +11,7 @@ pub use peekable_receiver::PeekableReceiver;
 pub use send_error::SendError;
 pub use try_recv_error::TryRecvError;
 
+use crate::Charge;
 use crate::OptionalSend;
 use crate::OptionalSync;
 
@@ -28,6 +29,30 @@ pub trait Mpsc: Sized {
     /// backpressure.
     #[track_caller]
     fn channel<T: OptionalSend>(buffer: usize) -> (Self::Sender<T>, Self::Receiver<T>);
+
+    /// The bytes a channel of `buffer` values carrying `T` allocates in its whole life, which a
+    /// funded channel is charged before it is made: see [`charged_channel`](Self::charged_channel).
+    ///
+    /// `None` if the runtime cannot fund its channels, which by default it cannot.
+    #[since(version = "0.10.0")]
+    fn block_bytes<T: OptionalSend>(_buffer: usize) -> Option<usize> {
+        None
+    }
+
+    /// Creates a bounded channel like [`channel`](Self::channel), funded by `charge`, taken before
+    /// for [`block_bytes`](Self::block_bytes): everything it allocates is made now, room for
+    /// `buffer` values and for the tasks waiting on it included, so neither a send nor a wait
+    /// allocates, and the charge is held until every handle is dropped and all of it is freed.
+    ///
+    /// `charge` is given back, with nothing allocated, if it does not hold the channel's bytes or
+    /// the runtime cannot fund its channels, which by default it cannot.
+    #[since(version = "0.10.0")]
+    fn charged_channel<T: OptionalSend>(
+        charge: Charge,
+        _buffer: usize,
+    ) -> Result<(Self::Sender<T>, Self::Receiver<T>), Charge> {
+        Err(charge)
+    }
 }
 
 /// Send values to the associated [`MpscReceiver`].
