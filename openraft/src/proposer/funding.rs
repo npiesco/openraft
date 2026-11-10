@@ -172,7 +172,15 @@ where
     /// refuses them, or the runtime cannot fund tasks or a part `more` sizes, which it tells by
     /// `None`. `more` is asked only of a funded node.
     pub(crate) fn take(funding: &Funding, more: impl FnOnce() -> Option<usize>) -> Result<Self, Unfunded> {
-        let charge = match &funding.0 {
+        Self::take_from(funding.0.as_ref(), more)
+    }
+
+    /// As [`Self::take`], charged to `funder`; uncharged without one.
+    pub(crate) fn take_from(
+        funder: Option<&Arc<dyn Funder>>,
+        more: impl FnOnce() -> Option<usize>,
+    ) -> Result<Self, Unfunded> {
+        let charge = match funder {
             Some(funder) => {
                 let task = spawned_bytes::<C, T>().ok_or(Unfunded)?;
                 let bytes = task.checked_add(more().ok_or(Unfunded)?).ok_or(Unfunded)?;

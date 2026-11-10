@@ -29,6 +29,7 @@ use crate::metrics::RaftDataMetrics;
 use crate::metrics::RaftServerMetrics;
 use crate::metrics::Wait;
 use crate::proposer::funding::OneshotCharge;
+use crate::proposer::funding::TaskCharge;
 use crate::raft::core_state::CoreState;
 use crate::type_config::AsyncRuntime;
 use crate::type_config::TypeConfigExt;
@@ -157,6 +158,17 @@ where C: RaftTypeConfig
     pub(crate) fn oneshot_charge<T>(&self, count: usize) -> Result<OneshotCharge<C, T>, Unfunded>
     where T: OptionalSend {
         OneshotCharge::take(self.funder.get(), count)
+    }
+
+    /// A task running `T` and `more` bytes of what it holds, charged to the node's funder before
+    /// any of it is made, as [`TaskCharge::take`] is: refused as [`Unfunded`], nothing charged.
+    /// A node run unfunded charges nothing.
+    pub(crate) fn task_charge<T>(&self, more: impl FnOnce() -> Option<usize>) -> Result<TaskCharge<C, T>, Unfunded>
+    where
+        T: Future + OptionalSend + 'static,
+        T::Output: OptionalSend + 'static,
+    {
+        TaskCharge::take_from(self.funder.get(), more)
     }
 
     /// Receive a message from RaftCore, return an error if the response is not delivered.

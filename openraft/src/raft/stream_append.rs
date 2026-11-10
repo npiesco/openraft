@@ -14,6 +14,7 @@ use crate::raft::AppendEntriesRequest;
 use crate::raft::StreamAppendError;
 use crate::raft::raft_inner::RaftInner;
 use crate::type_config::alias::LogIdOf;
+use crate::type_config::alias::MpscReceiverOf;
 use crate::type_config::alias::OneshotReceiverOf;
 use crate::type_config::async_runtime::MpscReceiver;
 use crate::type_config::async_runtime::MpscSender;
@@ -38,7 +39,9 @@ struct Pending<C: RaftTypeConfig> {
 /// On API error (Conflict or HigherVote), the stream terminates with the error.
 /// On Fatal error (RaftCore stopped), the stream yields `Err(RaftError::Fatal)` and terminates.
 /// A request whose answer's channel the node's funder refuses is not sent: the stream yields
-/// `Err(RaftError::Unfunded)` in its place and terminates.
+/// `Err(RaftError::Unfunded)` in its place and terminates. The background task is charged to the
+/// node's funder before it is spawned: refused, nothing is made, and the stream yields
+/// `Err(RaftError::Unfunded)` alone.
 /// The background task exits when it fails to send to the dropped channel.
 pub(in crate::raft) fn stream_append<C, S>(
     inner: Arc<RaftInner<C>>,
@@ -48,11 +51,50 @@ where
     C: RaftTypeConfig,
     S: Stream<Item = AppendEntriesRequest<C>> + OptionalSend + 'static,
 {
+    futures_util::stream::unfold(Some(pipeline(inner, input)), |state| async move {
+        let (mut rx, inner) = match state? {
+            Ok(pipeline) => pipeline,
+            Err(unfunded) => return Some((Err(unfunded.into()), None)),
+        };
+        let p: Pending<C> = MpscReceiver::recv(&mut rx).await?;
+
+        let result: Result<StreamAppendResult<C>, RaftError<C>> = match p.response_rx {
+            Err(unfunded) => Err(unfunded.into()),
+            Ok(response_rx) => match response_rx.await {
+                Ok(r) => Ok(r),
+                Err(_) => {
+                    let fatal = inner.get_core_stop_error().await;
+                    tracing::error!("stream_append: RaftCore stopped: {}", fatal);
+                    Err(fatal.into())
+                }
+            },
+        };
+
+        match &result {
+            Ok(Ok(_)) => Some((result, Some(Ok((rx, inner))))),
+            _ => Some((result, None)),
+        }
+    })
+}
+
+/// Spawns the task that sends `input`'s requests to RaftCore, charged to the node's funder before
+/// anything of it is made, and returns the receiver of their answers' channels: refused as
+/// [`Unfunded`], nothing made and `input` dropped.
+fn pipeline<C, S>(
+    inner: Arc<RaftInner<C>>,
+    input: S,
+) -> Result<(MpscReceiverOf<C, Pending<C>>, Arc<RaftInner<C>>), Unfunded>
+where
+    C: RaftTypeConfig,
+    S: Stream<Item = AppendEntriesRequest<C>> + OptionalSend + 'static,
+{
+    let task = inner.task_charge(|| Some(0))?;
+
     let (tx, rx) = C::mpsc::<Pending<C>>(PIPELINE_BUFFER_SIZE);
 
     let unfold_inner = inner.clone();
 
-    let _join_handle = C::spawn(async move {
+    let _join_handle = task.spawn(async move {
         futures_util::pin_mut!(input);
 
         while let Some(req) = input.next().await {
@@ -81,27 +123,7 @@ where
                 break;
             }
         }
-    });
+    })?;
 
-    futures_util::stream::unfold(Some((rx, unfold_inner)), |state| async move {
-        let (mut rx, inner) = state?;
-        let p: Pending<C> = MpscReceiver::recv(&mut rx).await?;
-
-        let result: Result<StreamAppendResult<C>, RaftError<C>> = match p.response_rx {
-            Err(unfunded) => Err(unfunded.into()),
-            Ok(response_rx) => match response_rx.await {
-                Ok(r) => Ok(r),
-                Err(_) => {
-                    let fatal = inner.get_core_stop_error().await;
-                    tracing::error!("stream_append: RaftCore stopped: {}", fatal);
-                    Err(fatal.into())
-                }
-            },
-        };
-
-        match &result {
-            Ok(Ok(_)) => Some((result, Some((rx, inner)))),
-            _ => Some((result, None)),
-        }
-    })
+    Ok((rx, unfold_inner))
 }

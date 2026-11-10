@@ -1086,7 +1086,8 @@ where
     /// - `Ok(log_id)` when logs are successfully flushed
     /// - `Err(e)` when an error occurs, which terminates the stream: a [`RaftError`], `Fatal` if
     ///   RaftCore stopped, or `Unfunded` in place of a request whose answer's channel the node's
-    ///   funder refused, unsent
+    ///   funder refused, unsent; or `Unfunded` alone if the funder refused the background task,
+    ///   which is charged before it is spawned, nothing made and `stream` dropped unread
     ///
     /// ## Pinning
     ///
