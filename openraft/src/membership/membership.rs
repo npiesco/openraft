@@ -495,15 +495,15 @@ where
 
     /// Ensures that every vote has a corresponding Node.
     ///
-    /// If a voter is found not having a Node, it returns the voter node id in an `Err()`
+    /// If a voter is found not having a Node, it returns the smallest such voter node id in an
+    /// `Err()`. It reads the configurations in place and allocates nothing, so validating a
+    /// membership, and refusing it, holds no memory beside it.
     pub(crate) fn ensure_voter_nodes(&self) -> Result<(), NID> {
-        for voter_id in self.voter_ids() {
-            if !self.members().nodes.contains_key(&voter_id) {
-                return Err(voter_id);
-            }
+        let members = self.members();
+        match members.configs.iter().flatten().filter(|id| !members.nodes.contains_key(id)).min() {
+            Some(voter_id) => Err(voter_id.clone()),
+            None => Ok(()),
         }
-
-        Ok(())
     }
 
     /// Returns the first node id that both memberships know but describe with a different [`Node`].

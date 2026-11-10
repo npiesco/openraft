@@ -122,7 +122,7 @@ where C: RaftTypeConfig
             .inner
             .call_core(
                 RaftMsg::ChangeMembership {
-                    changes: changes.clone(),
+                    changes,
                     payloads,
                     retain,
                     preconditions: Batch::of(preconditions.as_ref().iter().cloned()),
@@ -162,7 +162,7 @@ where C: RaftTypeConfig
         let uniform_payload = self.inner.recv_msg(unused_rx).await?;
 
         tracing::debug!("committed a joint config: {} {:?}", log_id, membership);
-        tracing::debug!("the second step is to change to uniform config: {:?}", changes);
+        tracing::debug!("the second step is to change to uniform config");
 
         // The last membership config log ID is changed because we have proposed a new membership config
         // log. Therefore, we need to remove the previous membership log ID precondition and add a new
