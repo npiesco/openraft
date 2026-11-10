@@ -142,10 +142,10 @@ mod tests {
             leader_vote: cv.clone(),
             targets: vec![TargetProgress {
                 target: 1,
-                target_node: (),
                 progress: ProgressEntry::empty(1, StreamId::new(1), 1),
             }],
             close_old_streams: false,
+            funding: None,
         };
         assert_eq!(cmd.name(), CommandName::RebuildReplicationStreams);
 

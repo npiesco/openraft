@@ -18,6 +18,7 @@ use std::sync::Mutex;
 use crate::RaftTypeConfig;
 use crate::errors::RPCError;
 use crate::network::Backoff;
+use crate::proposer::funding::arc_block_bytes;
 use crate::replication::backoff_consumer::BackoffConsumer;
 use crate::type_config::alias::WatchReceiverOf;
 
@@ -35,6 +36,11 @@ pub(crate) struct BackoffState {
 }
 
 impl BackoffState {
+    /// The block of the backoff it shares with its consumers, freed with the last of them.
+    pub(crate) const fn block_bytes() -> usize {
+        arc_block_bytes::<Mutex<Option<Backoff>>>()
+    }
+
     pub(crate) fn new() -> Self {
         Self {
             rank: 0,

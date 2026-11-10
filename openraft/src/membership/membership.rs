@@ -15,21 +15,9 @@ use crate::membership::IntoNodes;
 use crate::membership::MembershipOwner;
 use crate::node::Node;
 use crate::node::NodeId;
+use crate::proposer::funding::arc_block_bytes;
 use crate::quorum::QuorumBridge;
 use crate::quorum::QuorumIntersection;
-
-/// The bytes an `Arc<T>` allocates for its block: its strong and weak counts, then the value,
-/// padded to the block's alignment.
-const fn arc_block_bytes<T>() -> usize {
-    let value = align_of::<T>();
-    let align = if value > align_of::<usize>() {
-        value
-    } else {
-        align_of::<usize>()
-    };
-    let offset = (2 * size_of::<usize>()).next_multiple_of(value);
-    (offset + size_of::<T>()).next_multiple_of(align)
-}
 
 /// The membership configuration of the cluster.
 ///

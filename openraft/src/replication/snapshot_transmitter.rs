@@ -1,10 +1,12 @@
 use display_more::DisplayOptionExt;
+use openraft_macros::since;
 
 use crate::RaftNetworkFactory;
 use crate::RaftTypeConfig;
 use crate::StorageError;
 use crate::async_runtime::MpscSender;
 use crate::async_runtime::Select2;
+use crate::async_runtime::watch::Watch;
 use crate::async_runtime::watch::WatchReceiver;
 use crate::core::notification::Notification;
 use crate::core::sm::handle::SnapshotReader;
@@ -17,16 +19,38 @@ use crate::network::NetBackoff;
 use crate::network::NetSnapshot;
 use crate::network::RPCOption;
 use crate::progress::inflight_id::InflightId;
+use crate::proposer::funding::task_bytes;
 use crate::replication::EXHAUSTED_BACKOFF_DELAY;
 use crate::replication::replication_context::ReplicationContext;
 use crate::replication::response::ReplicationResult;
-use crate::replication::snapshot_transmitter_handle::SnapshotTransmitterHandle;
 use crate::storage::RaftStateMachine;
 use crate::type_config::TypeConfigExt;
 use crate::type_config::alias::SmSnapshotOf;
 use crate::type_config::alias::VoteOf;
-use crate::type_config::alias::WatchSenderOf;
+use crate::type_config::alias::WatchOf;
 use crate::vote::raft_vote::RaftVoteExt;
+
+/// The bytes a Leader charges for each snapshot transmitter it runs to another member, sending
+/// through clients of `NF` the snapshots of `SM`, before any of it is made: its task, everything
+/// the runtime allocates for it, and the channel that stops it, each held until it is freed. The
+/// client is not among them: it funds its own allocations. A Leader runs at most one transmitter
+/// per other member, but a replaced one's task may still run until it sees it is stopped: a node
+/// run with a funder holds two transmitters charged at once per other member.
+///
+/// `None` if the runtime cannot fund its tasks or channels now, as
+/// [`AsyncRuntime::spawn_bytes`](crate::async_runtime::AsyncRuntime::spawn_bytes) tells: a funded
+/// Leader sends no snapshot then.
+#[since(version = "0.10.0")]
+pub fn snapshot_transmitter_bytes<C, NF, SM>() -> Option<usize>
+where
+    C: RaftTypeConfig,
+    NF: RaftNetworkFactory<C>,
+    NF::Network: NetSnapshot<C, SnapshotData = SM::SnapshotData>,
+    SM: RaftStateMachine<C>,
+{
+    task_bytes::<C, _, _>(SnapshotTransmitter::<C, NF, SM>::stream_snapshot)?
+        .checked_add(WatchOf::<C>::block_bytes::<()>()?)
+}
 
 /// The number of `Network` errors that [`SnapshotTransmitter`] retries immediately. The next one
 /// starts the backoff.
@@ -83,34 +107,25 @@ where
     N::Network: NetSnapshot<C, SnapshotData = SM::SnapshotData>,
     SM: RaftStateMachine<C>,
 {
-    pub(crate) fn spawn(
+    /// A transmitter not yet spawned: spawn [`stream_snapshot`](Self::stream_snapshot) to run it.
+    pub(crate) fn new(
         replication_context: ReplicationContext<C>,
         network: N::Network,
         snapshot_reader: SnapshotReader<C, SM>,
         inflight_id: InflightId,
-        cancel_tx: WatchSenderOf<C, ()>,
-    ) -> SnapshotTransmitterHandle<C> {
-        let snapshot_transmit = Self {
+    ) -> Self {
+        Self {
             replication_context,
             inflight_id,
             network,
             backoff: None,
             network_errors: 0,
             snapshot_reader,
-        };
-
-        // TODO: this function should just return join_handle and let the caller build
-        //       SnapshotTransmitterHandle
-        let join_handle = C::spawn(snapshot_transmit.stream_snapshot());
-
-        SnapshotTransmitterHandle {
-            _join_handle: join_handle,
-            _tx_cancel: cancel_tx,
         }
     }
 
     #[tracing::instrument(level = "info", skip_all)]
-    async fn stream_snapshot(mut self) {
+    pub(crate) async fn stream_snapshot(mut self) {
         tracing::info!("{}", func_name!());
 
         let mut ith: i32 = -1;

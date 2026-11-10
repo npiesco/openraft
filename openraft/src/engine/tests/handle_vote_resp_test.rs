@@ -218,10 +218,10 @@ fn test_handle_vote_resp_equal_vote() -> anyhow::Result<()> {
                     leader_vote: Vote::new(2, 1).to_committed(),
                     targets: vec![TargetProgress {
                         target: 2,
-                        target_node: (),
                         progress: ProgressEntry::empty(2, StreamId::new(2), 1),
                     }],
                     close_old_streams: true,
+                    funding: None,
                 },
                 Command::SaveVote {
                     vote: Vote::new_committed(2, 1)

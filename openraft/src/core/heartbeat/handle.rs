@@ -8,10 +8,10 @@ use tracing::Level;
 use tracing::Span;
 
 use crate::Config;
+use crate::Membership;
 use crate::OptionalSend;
 use crate::RaftNetworkFactory;
 use crate::RaftTypeConfig;
-use crate::async_runtime::AsyncRuntime;
 use crate::async_runtime::Charge;
 use crate::async_runtime::Oneshot;
 use crate::async_runtime::watch::Watch;
@@ -25,8 +25,8 @@ use crate::network::NetStreamAppend;
 use crate::progress::stream_id::StreamId;
 use crate::proposer::funding::Funding;
 use crate::proposer::funding::TaskCharge;
+use crate::proposer::funding::spawned_bytes;
 use crate::proposer::funding::tree_bytes;
-use crate::type_config::alias::AsyncRuntimeOf;
 use crate::type_config::alias::CommittedVoteOf;
 use crate::type_config::alias::JoinHandleOf;
 use crate::type_config::alias::MpscSenderOf;
@@ -107,7 +107,7 @@ where
     T: Future + OptionalSend + 'static,
     T::Output: OptionalSend + 'static,
 {
-    AsyncRuntimeOf::<C>::spawn_bytes::<T>()
+    spawned_bytes::<C, T>()
 }
 
 /// The blocks of the channels a heartbeat worker holds: the one that stops it and the one it is
@@ -116,6 +116,32 @@ fn worker_parts_bytes<C: RaftTypeConfig>() -> Option<usize> {
     let stop = OneshotOf::<C>::block_bytes::<()>()?;
     let events = WatchOf::<C>::block_bytes::<Option<HeartbeatEvent<C>>>()?;
     stop.checked_add(events)
+}
+
+/// What a spawn of heartbeat workers makes each of them with, besides its target and client:
+/// the vote they are sent for, where they notify their progress, the membership whose nodes they
+/// send to, and the funding each is charged to. Borrowed, not copied.
+pub(crate) struct Spawning<'a, C>
+where C: RaftTypeConfig
+{
+    pub(crate) leader_vote: CommittedVoteOf<C>,
+    pub(crate) tx_notification: &'a MpscSenderOf<C, Notification<C>>,
+    pub(crate) membership: &'a Membership<C::NodeId, C::Node>,
+    pub(crate) funding: &'a Funding,
+}
+
+impl<C> Spawning<'_, C>
+where C: RaftTypeConfig
+{
+    /// What one worker is made with.
+    fn for_worker(&self) -> Self {
+        Self {
+            leader_vote: self.leader_vote.clone(),
+            tx_notification: self.tx_notification,
+            membership: self.membership,
+            funding: self.funding,
+        }
+    }
 }
 
 pub(crate) struct HeartbeatWorkersHandle<C>
@@ -133,8 +159,9 @@ where C: RaftTypeConfig
 
     /// The targets of the last [`spawn_workers`](Self::spawn_workers), kept while any of them is
     /// left without a worker because its charge was refused: spawned again before each heartbeat
-    /// is sent, until each has its worker. What the caller rebuilt them with, kept, not copied.
-    unspawned: Option<Vec<TargetProgress<C>>>,
+    /// is sent, until each has its worker. What the caller rebuilt them with, kept, not copied,
+    /// with what they were charged, declared after them, held until they are freed.
+    unspawned: Option<(Vec<TargetProgress<C>>, Option<Charge>)>,
 }
 
 impl<C> HeartbeatWorkersHandle<C>
@@ -176,45 +203,41 @@ where C: RaftTypeConfig
     /// Spawns again, each charged to `funding` as [`spawn_workers`](Self::spawn_workers) charges
     /// it, the workers the last spawn left their targets without, keeping the workers they have;
     /// those refused again are kept to be spawned before the next heartbeat.
-    pub(crate) async fn spawn_unspawned<NF>(
-        &mut self,
-        leader_vote: CommittedVoteOf<C>,
-        network_factory: &mut NF,
-        tx_notification: &MpscSenderOf<C, Notification<C>>,
-        funding: &Funding,
-    ) where
-        NF: RaftNetworkFactory<C>,
-    {
-        let Some(targets) = self.unspawned.take() else {
+    pub(crate) async fn spawn_unspawned<NF>(&mut self, spawning: Spawning<'_, C>, network_factory: &mut NF)
+    where NF: RaftNetworkFactory<C> {
+        let Some((targets, charge)) = self.unspawned.take() else {
             return;
         };
-        if !self.spawn_workers(leader_vote, network_factory, tx_notification, &targets, false, funding).await {
-            self.keep_unspawned(targets);
+        let complete = self.spawn_workers(spawning, network_factory, &targets, false).await;
+        if complete {
+            drop(targets);
+            drop(charge);
+        } else {
+            self.keep_unspawned(targets, charge);
         }
     }
 
     /// Keeps `targets`, which [`spawn_workers`](Self::spawn_workers) was just given and left
-    /// some of without a worker, to be spawned again before the next heartbeat.
-    pub(crate) fn keep_unspawned(&mut self, targets: Vec<TargetProgress<C>>) {
-        self.unspawned = Some(targets);
+    /// some of without a worker, to be spawned again before the next heartbeat, with `charge`, what
+    /// they were charged, held until they are freed.
+    pub(crate) fn keep_unspawned(&mut self, targets: Vec<TargetProgress<C>>, charge: Option<Charge>) {
+        self.unspawned = Some((targets, charge));
     }
 
     /// Spawns a worker for each of `progresses` that has none, or each if `close_old`, every part
-    /// of a worker charged to `funding` before any of it is made: its task, the channels that
-    /// stop it and send it heartbeats, and the network client it sends them with, which funds its
-    /// own copy of the target. A worker refused its charge is not made; the map holding the
-    /// workers is charged before it is built, refused, no worker is spawned, and the old ones are
-    /// kept unless `close_old`. Returns whether every target has its worker: if not, the caller
-    /// keeps `progresses` with [`keep_unspawned`](Self::keep_unspawned), so those left without are
-    /// spawned again before the next heartbeat is sent.
+    /// of a worker charged to `spawning`'s funding before any of it is made: its task, the channels
+    /// that stop it and send it heartbeats, and the network client it sends them with, which
+    /// funds its own copy of the target. A worker refused its charge is not made; the map
+    /// holding the workers is charged before it is built, refused, no worker is spawned, and
+    /// the old ones are kept unless `close_old`. Returns whether every target has its worker:
+    /// if not, the caller keeps `progresses` with [`keep_unspawned`](Self::keep_unspawned), so
+    /// those left without are spawned again before the next heartbeat is sent.
     pub(crate) async fn spawn_workers<NF>(
         &mut self,
-        leader_vote: CommittedVoteOf<C>,
+        spawning: Spawning<'_, C>,
         network_factory: &mut NF,
-        tx_notification: &MpscSenderOf<C, Notification<C>>,
         progresses: &[TargetProgress<C>],
         close_old: bool,
-        funding: &Funding,
     ) -> bool
     where
         NF: RaftNetworkFactory<C>,
@@ -222,7 +245,7 @@ where C: RaftTypeConfig
         // Whatever an earlier spawn left unspawned is replaced by what this one leaves.
         self.unspawned = None;
 
-        let Ok(workers_funding) = funding.charge(heartbeat_map_bytes::<C>(progresses.len())) else {
+        let Ok(workers_funding) = spawning.funding.charge(heartbeat_map_bytes::<C>(progresses.len())) else {
             tracing::warn!("id={}: no HeartbeatWorkers: their map is unfunded", self.id);
             // Workers asked to be replaced must not go on sending for what they were made for.
             if close_old {
@@ -244,14 +267,18 @@ where C: RaftTypeConfig
             let handle = if let Some(handle) = handle {
                 handle
             } else {
+                // A target no longer a member needs no worker: the rebuild for the membership
+                // that removed it follows.
+                let Some(node) = spawning.membership.get_node(&prog.target) else {
+                    continue;
+                };
                 let spawned = Self::spawn_worker(
                     self.id.clone(),
                     self.config.clone(),
-                    leader_vote.clone(),
+                    spawning.for_worker(),
                     network_factory,
-                    tx_notification,
                     prog,
-                    funding,
+                    node,
                 )
                 .await;
                 let Some(handle) = spawned else {
@@ -279,16 +306,15 @@ where C: RaftTypeConfig
     async fn spawn_worker<NF>(
         id: C::NodeId,
         config: Arc<Config>,
-        leader_vote: CommittedVoteOf<C>,
+        spawning: Spawning<'_, C>,
         network_factory: &mut NF,
-        tx_notification: &MpscSenderOf<C, Notification<C>>,
         prog: &TargetProgress<C>,
-        funding: &Funding,
+        node: &C::Node,
     ) -> Option<WorkerHandle<C>>
     where
         NF: RaftNetworkFactory<C>,
     {
-        let mut task = match TaskCharge::<C, _>::take(funding, worker_parts_bytes::<C>) {
+        let mut task = match TaskCharge::<C, _>::take(spawning.funding, worker_parts_bytes::<C>) {
             Ok(task) => task,
             Err(Unfunded) => {
                 tracing::warn!("id={} target={}: no HeartbeatWorker: it is unfunded", id, prog.target);
@@ -300,19 +326,19 @@ where C: RaftTypeConfig
         let (tx_shutdown, rx_shutdown) = task.oneshot::<()>().ok()?;
         let (tx, rx) = task.watch(None).ok()?;
 
-        let network = network_factory.new_heartbeat_client(prog.target.clone(), &prog.target_node).await;
+        let network = network_factory.new_heartbeat_client(prog.target.clone(), node).await;
 
         let span = tracing::span!(parent: &Span::current(), Level::DEBUG, "heartbeat", id=display(&id), target=display(&prog.target));
 
         let worker = HeartbeatWorker {
             id,
-            leader_vote,
+            leader_vote: spawning.leader_vote,
             stream_id: prog.progress.data.stream_id,
             rx,
             network,
             target: prog.target.clone(),
             config,
-            tx_notification: tx_notification.clone(),
+            tx_notification: spawning.tx_notification.clone(),
         };
 
         let worker_handle = task.spawn(worker_task(worker, rx_shutdown, span)).ok()?;
@@ -334,9 +360,12 @@ mod tests {
 
     use futures_util::Stream;
     use futures_util::StreamExt;
+    use maplit::btreeset;
 
     use super::HeartbeatWorkersHandle;
+    use super::Spawning;
     use crate::Config;
+    use crate::Membership;
     use crate::OptionalSend;
     use crate::RaftNetworkFactory;
     use crate::RaftNetworkV2;
@@ -438,7 +467,6 @@ mod tests {
             let leader_vote = Vote::<UTLeaderId>::new(1, 1).to_committed();
             let targets = vec![TargetProgress {
                 target: 2,
-                target_node: (),
                 progress: ProgressEntry::empty(2, StreamId::new(1), 0),
             }];
             let heartbeat = || {
@@ -449,37 +477,31 @@ mod tests {
                 })]
             };
 
+            let membership = Membership::<u64, ()>::new_with_defaults(vec![btreeset! {1, 2}], []);
             let refusing = Limit::new(0);
-            let complete = handle
-                .spawn_workers(
-                    leader_vote.clone(),
-                    &mut Followers,
-                    &tx_notification,
-                    &targets,
-                    false,
-                    &refusing.funding(),
-                )
-                .await;
+            let refused = refusing.funding();
+            let unfunded = Funding::default();
+            let spawning = |funding| Spawning {
+                leader_vote: leader_vote.clone(),
+                tx_notification: &tx_notification,
+                membership: &membership,
+                funding,
+            };
+
+            let complete = handle.spawn_workers(spawning(&refused), &mut Followers, &targets, false).await;
             assert!(!complete);
             assert_eq!(0, refusing.held(), "a refused worker is charged nothing");
-            handle.keep_unspawned(targets);
+            handle.keep_unspawned(targets, None);
             assert!(handle.workers.is_empty());
 
-            handle
-                .spawn_unspawned(
-                    leader_vote.clone(),
-                    &mut Followers,
-                    &tx_notification,
-                    &refusing.funding(),
-                )
-                .await;
+            handle.spawn_unspawned(spawning(&refused), &mut Followers).await;
             assert!(handle.has_unspawned(), "refused again, it is kept");
             handle.broadcast(heartbeat());
             assert!(rx_notification.try_recv().is_err(), "no worker reaches it");
 
             // A node whose funder holds what the worker takes; the test runtime funds no task, so
             // the worker is made as on a node run unfunded.
-            handle.spawn_unspawned(leader_vote, &mut Followers, &tx_notification, &Funding::default()).await;
+            handle.spawn_unspawned(spawning(&unfunded), &mut Followers).await;
             assert!(!handle.has_unspawned());
             handle.broadcast(heartbeat());
             let reached = rx_notification.recv().await.unwrap();

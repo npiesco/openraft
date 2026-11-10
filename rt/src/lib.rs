@@ -34,6 +34,7 @@ pub mod watch;
 
 pub use async_runtime::AsyncRuntime;
 pub use funding::Charge;
+pub use funding::Charged;
 pub use funding::Funder;
 pub use instant::Instant;
 pub use mpsc::Mpsc;

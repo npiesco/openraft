@@ -157,6 +157,9 @@ pub use crate::raft_state::RaftState;
 pub use crate::raft_types::SnapshotId;
 #[allow(deprecated)]
 pub use crate::raft_types::SnapshotSegmentId;
+pub use crate::replication::replication_handle::replication_map_bytes;
+pub use crate::replication::replication_stream_bytes;
+pub use crate::replication::snapshot_transmitter::snapshot_transmitter_bytes;
 pub use crate::summary::MessageSummary;
 pub use crate::try_as_ref::TryAsRef;
 pub use crate::type_config::RaftTypeConfig;

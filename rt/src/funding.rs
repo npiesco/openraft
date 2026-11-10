@@ -1,7 +1,13 @@
 //! Funding for the memory a Raft node allocates on behalf of its owner.
 
 use std::fmt;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::Context;
+use std::task::Poll;
+
+use pin_project_lite::pin_project;
 
 /// What a Raft node charges, before it makes each, the allocations it makes for its owner: the
 /// channels its callers wait on and its leader's state. A charge refused allocates nothing and
@@ -85,5 +91,109 @@ impl Drop for Charge {
 impl fmt::Debug for Charge {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Charge").field("bytes", &self.bytes).finish()
+    }
+}
+
+pin_project! {
+    /// A future run holding the charge that funds what it holds: declared after the future, the
+    /// charge is credited back only once the future, and every allocation it holds, is freed,
+    /// whether it completed, was cancelled, or was given back unspawned.
+    pub struct Charged<F> {
+        #[pin]
+        future: F,
+        _charge: Charge,
+    }
+}
+
+impl<F> Charged<F> {
+    /// `future`, holding `charge` until it is freed.
+    pub fn new(future: F, charge: Charge) -> Self {
+        Self {
+            future,
+            _charge: charge,
+        }
+    }
+}
+
+impl<F: Future> Future for Charged<F> {
+    type Output = F::Output;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<F::Output> {
+        self.project().future.poll(cx)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
+    use std::task::Context;
+    use std::task::Poll;
+
+    use super::Charge;
+    use super::Charged;
+    use super::Funder;
+
+    /// A funder that records whether a charge came back before what it funded was freed.
+    #[derive(Default)]
+    struct Ledger {
+        held: AtomicUsize,
+        freed: AtomicBool,
+        early: AtomicBool,
+    }
+
+    impl Funder for Ledger {
+        fn charge(&self, bytes: usize) -> bool {
+            self.held.fetch_add(bytes, Ordering::SeqCst);
+            true
+        }
+
+        fn release(&self, bytes: usize) {
+            if !self.freed.load(Ordering::SeqCst) {
+                self.early.store(true, Ordering::SeqCst);
+            }
+            self.held.fetch_sub(bytes, Ordering::SeqCst);
+        }
+    }
+
+    /// A future holding what its charge funds, freed when it is dropped.
+    struct Holding(Arc<Ledger>);
+
+    impl Future for Holding {
+        type Output = ();
+
+        fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<()> {
+            Poll::Ready(())
+        }
+    }
+
+    impl Drop for Holding {
+        fn drop(&mut self) {
+            self.0.freed.store(true, Ordering::SeqCst);
+        }
+    }
+
+    /// A charged future given back unspawned is dropped before its charge is credited back:
+    /// what the future held is freed first.
+    #[test]
+    fn a_charged_future_is_freed_before_its_charge_goes_back() {
+        let ledger = Arc::new(Ledger::default());
+        let funder: Arc<dyn Funder> = ledger.clone();
+        let charge = Charge::take(&funder, 64).expect("granted");
+        let charged = Charged::new(Holding(ledger.clone()), charge);
+        assert_eq!(64, ledger.held.load(Ordering::SeqCst));
+
+        drop(charged);
+
+        assert!(ledger.freed.load(Ordering::SeqCst));
+        assert!(
+            !ledger.early.load(Ordering::SeqCst),
+            "credited back only after the future is freed"
+        );
+        assert_eq!(0, ledger.held.load(Ordering::SeqCst));
     }
 }

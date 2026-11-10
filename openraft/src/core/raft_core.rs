@@ -19,12 +19,14 @@ use crate::OptionalSend;
 use crate::RaftState;
 use crate::RaftTypeConfig;
 use crate::StorageError;
+use crate::async_runtime::Charge;
 use crate::async_runtime::MpscReceiver;
 use crate::async_runtime::Mutex;
 use crate::async_runtime::OneshotSender;
 use crate::async_runtime::Select4;
 use crate::async_runtime::TryRecvError;
 use crate::async_runtime::mpsc::PeekableReceiver;
+use crate::async_runtime::watch::Watch;
 use crate::async_runtime::watch::WatchSender;
 use crate::batch::Batch;
 use crate::config::Config;
@@ -41,6 +43,7 @@ use crate::core::balancer::Balancer;
 use crate::core::core_state::CoreState;
 use crate::core::heartbeat::event::HeartbeatEvent;
 use crate::core::heartbeat::handle::HeartbeatWorkersHandle;
+use crate::core::heartbeat::handle::Spawning;
 use crate::core::merged_raft_msg_receiver::BatchRaftMsgReceiver;
 use crate::core::notification::Notification;
 use crate::core::raft_msg::AppendEntriesTx;
@@ -100,6 +103,7 @@ use crate::progress::stream_id::StreamId;
 use crate::proposer::Leader;
 use crate::proposer::LeaderQuorumSet;
 use crate::proposer::SendStamp;
+use crate::proposer::funding::TaskCharge;
 use crate::raft::AppendEntriesRequest;
 use crate::raft::ClientWriteResult;
 use crate::raft::LogSegment;
@@ -120,8 +124,11 @@ use crate::replication::event_watcher::EventWatcher;
 use crate::replication::replicate::Replicate;
 use crate::replication::replication_context::ReplicationContext;
 use crate::replication::replication_handle::ReplicationHandle;
+use crate::replication::replication_handle::replication_map_bytes;
 use crate::replication::replication_progress;
 use crate::replication::snapshot_transmitter::SnapshotTransmitter;
+use crate::replication::snapshot_transmitter_handle::SnapshotTransmitterHandle;
+use crate::replication::stream_parts_bytes;
 use crate::runtime::RaftRuntime;
 use crate::storage::IOFlushed;
 use crate::storage::RaftLogStorage;
@@ -140,8 +147,8 @@ use crate::type_config::alias::MutexOf;
 use crate::type_config::alias::OneshotReceiverOf;
 use crate::type_config::alias::PayloadOf;
 use crate::type_config::alias::VoteOf;
+use crate::type_config::alias::WatchOf;
 use crate::type_config::alias::WatchReceiverOf;
-use crate::type_config::alias::WatchSenderOf;
 use crate::type_config::async_runtime::mpsc::MpscSender;
 use crate::vote::RaftLeaderId;
 use crate::vote::RaftVote;
@@ -233,6 +240,13 @@ where
 
     /// A mapping of node IDs the replication state of the target node.
     pub(crate) replications: BTreeMap<C::NodeId, ReplicationHandle<C>>,
+
+    /// The nodes of `replications`, charged before the map is built for at most
+    /// `replications_room` streams and held, declared after it, until they are freed.
+    pub(crate) replications_funding: Option<Charge>,
+
+    /// How many streams `replications_funding` was charged for.
+    pub(crate) replications_room: usize,
 
     pub(crate) heartbeat_handle: HeartbeatWorkersHandle<C>,
 
@@ -1173,76 +1187,106 @@ where
         Ok(())
     }
 
-    /// Spawn a new replication stream returning its replication state handle.
-    #[tracing::instrument(level = "debug", skip(self))]
-    #[allow(clippy::type_complexity)]
+    /// A replication stream to `target` for `leader_vote`, the stream `stream_id` of its
+    /// progress, replicating from `matching`, every part of it charged before any is made, as
+    /// [`replication_stream_bytes`](crate::replication_stream_bytes) sizes it: its task, the
+    /// channels it holds and the state its task holds, and the network client it replicates with,
+    /// which funds its own copy of the target. None, nothing made, if the charge is refused or
+    /// `target` is no member of the effective membership.
+    #[tracing::instrument(level = "debug", skip_all)]
     pub(crate) async fn spawn_replication_stream(
         &mut self,
         leader_vote: CommittedVoteOf<C>,
-        prog: &TargetProgress<C>,
-    ) -> ReplicationHandle<C> {
-        let network = {
-            let mut factory = self.network_factory.lock().await;
-            factory.new_client(prog.target.clone(), &prog.target_node).await
+        target: &C::NodeId,
+        stream_id: StreamId,
+        matching: Option<LogIdOf<C>>,
+    ) -> Option<ReplicationHandle<C>> {
+        let Some(node) = self.engine.state.membership_state.effective().get_node(target) else {
+            tracing::debug!(
+                "id={} target={}: no replication stream: no longer a member",
+                self.id,
+                target
+            );
+            return None;
         };
 
-        let (replicate_tx, replicate_rx) = C::watch_channel(Replicate::default());
-        let (backoff_reset_tx, backoff_reset_rx) = C::watch_channel(());
+        let mut task = match TaskCharge::<C, _>::take(&self.engine.config.funding, stream_parts_bytes::<C, LS>) {
+            Ok(task) => task,
+            Err(Unfunded) => {
+                tracing::warn!(
+                    "id={} target={}: no replication stream: it is unfunded",
+                    self.id,
+                    target
+                );
+                return None;
+            }
+        };
+
+        // Each channel from its share of the charge taken for all of them: none is refused. The
+        // rest is held with the task, and funds what the task holds.
+        let (replicate_tx, replicate_rx) = task.watch(Replicate::default()).ok()?;
+        let (backoff_reset_tx, backoff_reset_rx) = task.watch(()).ok()?;
+        let (cancel_tx, cancel_rx) = task.watch(()).ok()?;
+
+        let network = {
+            let mut factory = self.network_factory.lock().await;
+            factory.new_client(target.clone(), node).await
+        };
 
         let event_watcher = self.new_event_watcher(replicate_rx);
-
-        let (mut replication_handle, replication_context) =
-            self.new_replication(leader_vote, prog, replicate_tx, backoff_reset_tx);
+        let replication_context = self.new_replication_context(leader_vote, target, stream_id, cancel_rx);
 
         let progress = replication_progress::ReplicationProgress {
             local_committed: self.engine.state.local_committed().cloned(),
-            remote_matched: prog.progress.matching.clone(),
+            remote_matched: matching,
         };
 
-        let join_handle = ReplicationCore::<C, NF, LS>::spawn(
+        let core = ReplicationCore::<C, NF, LS>::new(
             replication_context,
             progress,
             network,
             self.log_store.get_log_reader().await,
             event_watcher,
             backoff_reset_rx,
-            tracing::span!(parent: &self.span, Level::DEBUG, "replication", id=display(&self.id), target=display(&prog.target)),
         );
 
-        replication_handle.join_handle = Some(join_handle);
+        let span = tracing::span!(parent: &self.span, Level::DEBUG, "replication", id=display(&self.id), target=display(target));
 
-        replication_handle
+        let join_handle = match task.spawn(core.main().instrument(span)) {
+            Ok(join_handle) => join_handle,
+            Err(Unfunded) => {
+                tracing::warn!(
+                    "id={} target={}: no replication stream: its task is unfunded",
+                    self.id,
+                    target
+                );
+                return None;
+            }
+        };
+
+        Some(ReplicationHandle::new(
+            stream_id,
+            replicate_tx,
+            cancel_tx,
+            backoff_reset_tx,
+            join_handle,
+        ))
     }
 
-    fn new_replication(
-        &self,
-        leader_vote: CommittedVoteOf<C>,
-        prog: &TargetProgress<C>,
-        replicate_tx: WatchSenderOf<C, Replicate<C>>,
-        backoff_reset_tx: WatchSenderOf<C, ()>,
-    ) -> (ReplicationHandle<C>, ReplicationContext<C>) {
-        let (cancel_tx, cancel_rx) = C::watch_channel(());
-
-        let context = self.new_replication_context(leader_vote, prog, cancel_rx);
-
-        let handle = ReplicationHandle::new(prog.progress.data.stream_id, replicate_tx, cancel_tx, backoff_reset_tx);
-
-        (handle, context)
-    }
-
+    /// The context of a replication task to `target` for `leader_vote`, of the stream `stream_id`,
+    /// stopped by `cancel_rx`.
     fn new_replication_context(
         &self,
         leader_vote: CommittedVoteOf<C>,
-        prog: &TargetProgress<C>,
+        target: &C::NodeId,
+        stream_id: StreamId,
         cancel_rx: WatchReceiverOf<C, ()>,
     ) -> ReplicationContext<C> {
-        let id = self.id.clone();
-
         ReplicationContext {
-            id,
-            target: prog.target.clone(),
+            id: self.id.clone(),
+            target: target.clone(),
             leader_vote,
-            stream_id: prog.progress.data.stream_id,
+            stream_id,
             config: self.config.clone(),
             tx_notify: self.tx_notification.clone(),
             cancel_rx,
@@ -2356,14 +2400,13 @@ where
 
         if self.heartbeat_handle.has_unspawned() {
             let mut factory = self.network_factory.lock().await;
-            self.heartbeat_handle
-                .spawn_unspawned::<NF>(
-                    committed_vote,
-                    &mut *factory,
-                    &self.tx_notification,
-                    &self.engine.config.funding,
-                )
-                .await;
+            let spawning = Spawning {
+                leader_vote: committed_vote,
+                tx_notification: &self.tx_notification,
+                membership: self.engine.state.membership_state.effective().membership(),
+                funding: &self.engine.config.funding,
+            };
+            self.heartbeat_handle.spawn_unspawned::<NF>(spawning, &mut *factory).await;
         }
 
         let Ok(lh) = self.engine.try_leader_handler() else {
@@ -2393,47 +2436,11 @@ where
         self.heartbeat_handle.broadcast(events);
     }
 
-    /// Creates a new replication context and its associated cancellation channel.
-    ///
-    /// Returns the context for the replication task and the sender half of the
-    /// cancellation channel. Dropping the sender signals the task to stop.
-    pub(crate) fn new_replication_task_context(
-        &self,
-        leader_vote: CommittedVoteOf<C>,
-        stream_id: StreamId,
-        target: C::NodeId,
-    ) -> (ReplicationContext<C>, WatchSenderOf<C, ()>) {
-        let (cancel_tx, cancel_rx) = C::watch_channel(());
-        let ctx = ReplicationContext {
-            id: self.id.clone(),
-            target,
-            leader_vote,
-            stream_id,
-            config: self.config.clone(),
-            tx_notify: self.tx_notification.clone(),
-            cancel_rx,
-            replicate_batch: self.shared_replicate_batch.clone(),
-        };
-        (ctx, cancel_tx)
-    }
-
-    fn close_replication(target: &C::NodeId, mut s: ReplicationHandle<C>) {
-        let Some(handle) = s.join_handle.take() else {
-            return;
-        };
-
-        // Drop sender to notify the task to shutdown
-        drop(s.replicate_tx);
-        drop(s.cancel_tx);
-        drop(s.backoff_reset_tx);
-
-        let target = target.clone();
-        #[allow(clippy::let_underscore_future)]
-        let _ = C::spawn(async move {
-            tracing::debug!("joining removed replication: {}", target);
-            let _x = handle.await;
-            tracing::info!("done joining removed replication: {}", target);
-        });
+    /// Stops the replication stream `s` to `target`: its channels are dropped, and its task ends
+    /// as it sees it is stopped. Its task is not joined, so nothing is spawned to join it.
+    fn close_replication(target: &C::NodeId, s: ReplicationHandle<C>) {
+        tracing::debug!("closing removed replication: {}", target);
+        drop(s);
     }
 
     /// Run [`Command::UpdateIOProgress`].
@@ -2596,107 +2603,258 @@ where
         Ok(())
     }
 
-    /// Run [`Command::ReplicateSnapshot`].
+    /// Run [`Command::ReplicateSnapshot`]: a snapshot transmitter to `target`, every part of it
+    /// charged before any is made, as
+    /// [`snapshot_transmitter_bytes`](crate::snapshot_transmitter_bytes) sizes it: its task, the
+    /// channel that stops it, and the network client it sends with, which funds its own copy of
+    /// the target. Refused its charge, or its replication stream, nothing is made, and the
+    /// snapshot inflight is reset to be sent again.
     async fn run_replicate_snapshot(
         &mut self,
         leader_vote: CommittedVoteOf<C>,
         target: C::NodeId,
         inflight_id: InflightId,
     ) {
-        let node = self.replications.get(&target).expect("replication to target node exists");
-
-        let snapshot_reader = self.sm_handle.new_snapshot_reader(self.engine.config.funding.clone());
-        let stream_id = node.stream_id;
-        let (replication_task_context, cancel_tx) =
-            self.new_replication_task_context(leader_vote, stream_id, target.clone());
-
-        let target_node = self.engine.state.membership_state.effective().get_node(&target).unwrap();
-        let snapshot_network = {
-            let mut factory = self.network_factory.lock().await;
-            factory.new_snapshot_client(target.clone(), target_node).await
+        let Some(stream_id) = self.replication_stream_id(&target).await else {
+            self.reset_inflight(target, inflight_id);
+            return;
         };
 
-        let handle = SnapshotTransmitter::<C, NF, SM>::spawn(
+        let mut task = match TaskCharge::<C, _>::take(&self.engine.config.funding, WatchOf::<C>::block_bytes::<()>) {
+            Ok(task) => task,
+            Err(Unfunded) => {
+                tracing::warn!(
+                    "id={} target={}: no snapshot transmitter: it is unfunded",
+                    self.id,
+                    target
+                );
+                self.reset_inflight(target, inflight_id);
+                return;
+            }
+        };
+
+        // From its share of the charge taken for it: not refused.
+        let Ok((cancel_tx, cancel_rx)) = task.watch(()) else {
+            self.reset_inflight(target, inflight_id);
+            return;
+        };
+
+        // A target no longer a member is sent nothing: what was made for it is freed before its
+        // charge goes back.
+        let Some(node) = self.engine.state.membership_state.effective().get_node(&target) else {
+            self.reset_inflight(target, inflight_id);
+            return;
+        };
+
+        let snapshot_network = {
+            let mut factory = self.network_factory.lock().await;
+            factory.new_snapshot_client(target.clone(), node).await
+        };
+
+        let snapshot_reader = self.sm_handle.new_snapshot_reader(self.engine.config.funding.clone());
+        let replication_task_context = self.new_replication_context(leader_vote, &target, stream_id, cancel_rx);
+
+        let transmitter = SnapshotTransmitter::<C, NF, SM>::new(
             replication_task_context,
             snapshot_network,
             snapshot_reader,
             inflight_id,
-            cancel_tx,
         );
+
+        let join_handle = match task.spawn(transmitter.stream_snapshot()) {
+            Ok(join_handle) => join_handle,
+            Err(Unfunded) => {
+                tracing::warn!(
+                    "id={} target={}: no snapshot transmitter: its task is unfunded",
+                    self.id,
+                    target
+                );
+                self.reset_inflight(target, inflight_id);
+                return;
+            }
+        };
+
+        let handle = SnapshotTransmitterHandle {
+            _join_handle: join_handle,
+            _tx_cancel: cancel_tx,
+        };
 
         let node = self.replications.get_mut(&target).expect("replication to target node exists");
         // TODO: it is not cleaned when snapshot transmission is done.
         node.snapshot_transmit_handle = Some(handle);
     }
 
+    /// The stream id of the replication stream to `target`, which is spawned now, for the
+    /// Leader's progress of `target`, if it has none: its earlier spawn was refused its charge. A
+    /// map of more streams than its nodes were charged for is charged again for them before the
+    /// stream is inserted. None, nothing made, if refused, or no Leader tracks `target`.
+    async fn replication_stream_id(&mut self, target: &C::NodeId) -> Option<StreamId> {
+        if let Some(handle) = self.replications.get(target) {
+            return Some(handle.stream_id);
+        }
+
+        let leader = self.engine.leader.as_ref()?;
+        let entry = leader.progress.try_get(target)?;
+        let leader_vote = leader.committed_vote.clone();
+        let stream_id = entry.data.stream_id;
+        let matching = entry.matching.clone();
+
+        let room = self.replications.len() + 1;
+        let grown = if room > self.replications_room {
+            let Ok(grown) = self.engine.config.funding.charge(replication_map_bytes::<C>(room)) else {
+                tracing::warn!(
+                    "id={} target={}: no replication stream: its map is unfunded",
+                    self.id,
+                    target
+                );
+                return None;
+            };
+            Some(grown)
+        } else {
+            None
+        };
+
+        let handle = self.spawn_replication_stream(leader_vote, target, stream_id, matching).await?;
+        self.replications.insert(target.clone(), handle);
+
+        // The map is now bounded by what it was charged again for: the old charge goes back.
+        if let Some(grown) = grown {
+            self.replications_funding = grown;
+            self.replications_room = room;
+        }
+        Some(stream_id)
+    }
+
+    /// Resets the inflight `inflight_id` to `target`, which was not sent: the Leader sends it
+    /// again, as it does after a replication error.
+    fn reset_inflight(&mut self, target: C::NodeId, inflight_id: InflightId) {
+        let Some(stream_id) = self
+            .engine
+            .leader
+            .as_ref()
+            .and_then(|leader| leader.progress.try_get(&target))
+            .map(|entry| entry.data.stream_id)
+        else {
+            return;
+        };
+        if let Some(mut rh) = self.engine.try_replication_handler() {
+            // An empty error allocates nothing.
+            rh.update_progress(target, stream_id, Err(String::new()), Some(inflight_id));
+        }
+    }
+
     /// Run [`Command::CloseReplicationStreams`].
     fn run_close_replication_streams(&mut self) {
         self.heartbeat_handle.close_workers();
+        self.close_replication_streams();
+    }
 
+    /// Stops every replication stream, the nodes of their map freed before its charge goes back.
+    fn close_replication_streams(&mut self) {
         let left = std::mem::take(&mut self.replications);
         for (target, s) in left {
             Self::close_replication(&target, s);
         }
+        self.replications_funding = None;
+        self.replications_room = 0;
     }
 
-    /// Run [`Command::RebuildReplicationStreams`].
+    /// Run [`Command::RebuildReplicationStreams`]: the heartbeat workers and replication streams
+    /// for `targets`, which `funding` was charged for before they were built and is held with
+    /// until they are freed.
+    ///
+    /// The map of the streams is charged before it is built, as
+    /// [`replication_map_bytes`](crate::replication_map_bytes) sizes it: refused, no stream is
+    /// spawned, and the old ones are kept unless `close_old_streams`. A stream refused its charge
+    /// is left out, and spawned when it is next replicated to: see
+    /// [`replication_stream_id`](Self::replication_stream_id).
     async fn run_rebuild_replication_streams(
         &mut self,
         leader_vote: CommittedVoteOf<C>,
         targets: Vec<TargetProgress<C>>,
         close_old_streams: bool,
+        funding: Option<Charge>,
     ) {
         let heartbeats_complete = {
             let mut factory = self.network_factory.lock().await;
+            let spawning = Spawning {
+                leader_vote: leader_vote.clone(),
+                tx_notification: &self.tx_notification,
+                membership: self.engine.state.membership_state.effective().membership(),
+                funding: &self.engine.config.funding,
+            };
             self.heartbeat_handle
-                .spawn_workers::<NF>(
-                    leader_vote.clone(),
-                    &mut *factory,
-                    &self.tx_notification,
-                    &targets,
-                    close_old_streams,
-                    &self.engine.config.funding,
-                )
+                .spawn_workers::<NF>(spawning, &mut *factory, &targets, close_old_streams)
                 .await
+        };
+
+        self.rebuild_replications(leader_vote, &targets, close_old_streams).await;
+
+        // Kept, not copied, for the heartbeat workers refused their funding to be spawned again;
+        // otherwise freed, then their charge goes back.
+        if heartbeats_complete {
+            drop(targets);
+            drop(funding);
+        } else {
+            self.heartbeat_handle.keep_unspawned(targets, funding);
+        }
+    }
+
+    /// The replication streams of
+    /// [`run_rebuild_replication_streams`](Self::run_rebuild_replication_streams).
+    async fn rebuild_replications(
+        &mut self,
+        leader_vote: CommittedVoteOf<C>,
+        targets: &[TargetProgress<C>],
+        close_old_streams: bool,
+    ) {
+        let Ok(map_funding) = self.engine.config.funding.charge(replication_map_bytes::<C>(targets.len())) else {
+            tracing::warn!("id={}: no replication streams rebuilt: their map is unfunded", self.id);
+            // Streams asked to be replaced must not go on replicating for what they were made for.
+            if close_old_streams {
+                self.close_replication_streams();
+            }
+            return;
         };
 
         let mut new_replications = BTreeMap::new();
 
-        for prog in targets.iter() {
+        for prog in targets {
             let removed = self.replications.remove(&prog.target);
 
-            let handle = if let Some(removed) = removed {
-                if close_old_streams {
+            let handle = match removed {
+                Some(removed) if close_old_streams => {
                     Self::close_replication(&prog.target, removed);
                     None
-                } else {
-                    Some(removed)
                 }
-            } else {
-                None
+                removed => removed,
             };
 
-            let handle = if let Some(handle) = handle {
-                handle
-            } else {
-                self.spawn_replication_stream(leader_vote.clone(), prog).await
+            let handle = match handle {
+                Some(handle) => Some(handle),
+                None => {
+                    let stream_id = prog.progress.data.stream_id;
+                    let matching = prog.progress.matching.clone();
+                    self.spawn_replication_stream(leader_vote.clone(), &prog.target, stream_id, matching).await
+                }
             };
 
-            new_replications.insert(prog.target.clone(), handle);
+            if let Some(handle) = handle {
+                new_replications.insert(prog.target.clone(), handle);
+            }
         }
 
         tracing::debug!("removing unused replications");
 
         let left = std::mem::replace(&mut self.replications, new_replications);
+        let left_funding = std::mem::replace(&mut self.replications_funding, map_funding);
+        self.replications_room = targets.len();
 
         for (target, s) in left {
             Self::close_replication(&target, s);
         }
-
-        // Kept, not copied, for the heartbeat workers refused their funding to be spawned again.
-        if !heartbeats_complete {
-            self.heartbeat_handle.keep_unspawned(targets);
-        }
+        // Only after the old map's nodes are freed.
+        drop(left_funding);
     }
 
     /// Run [`Command::StateMachine`], forwarding the inner command to the state machine worker.
@@ -2785,6 +2943,12 @@ where
                 self.run_save_committed_and_apply(already_applied, upto).await?
             }
             Command::Replicate { req, target } => {
+                // A stream refused its charge is spawned now: refused again, the request is not
+                // sent, and its inflight is reset to be sent again.
+                if self.replication_stream_id(&target).await.is_none() {
+                    self.reset_inflight(target, req.inflight_id);
+                    return Ok(None);
+                }
                 let node = self.replications.get(&target).expect("replication to target node exists");
                 node.replicate_tx.send(req).ok();
             }
@@ -2800,8 +2964,9 @@ where
                 leader_vote,
                 targets,
                 close_old_streams,
+                funding,
             } => {
-                self.run_rebuild_replication_streams(leader_vote, targets, close_old_streams).await;
+                self.run_rebuild_replication_streams(leader_vote, targets, close_old_streams, funding).await;
             }
             Command::StateMachine { command } => self.run_state_machine(command).await?,
             Command::Respond { resp, .. } => resp.send(),

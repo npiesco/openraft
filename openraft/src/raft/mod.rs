@@ -639,6 +639,8 @@ where
                         pending_reads: PendingReadQueue::default(),
                         pending_read_deadline_notifier: PendingReadDeadlineNotifier::spawn(tx_notify.clone()),
                         replications: Default::default(),
+                        replications_funding: None,
+                        replications_room: 0,
 
                         heartbeat_handle: HeartbeatWorkersHandle::new(id.clone(), config.clone()),
                         tx_api: tx_api.clone(),

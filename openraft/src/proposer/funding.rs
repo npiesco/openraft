@@ -19,9 +19,11 @@ use crate::OptionalSync;
 use crate::RaftTypeConfig;
 use crate::async_runtime::AsyncRuntime;
 use crate::async_runtime::Charge;
+use crate::async_runtime::Charged;
 use crate::async_runtime::Funder;
 use crate::async_runtime::Oneshot;
 use crate::async_runtime::watch::Watch;
+use crate::engine::TargetProgress;
 use crate::errors::Unfunded;
 use crate::node::Node;
 use crate::node::NodeId;
@@ -172,7 +174,7 @@ where
     pub(crate) fn take(funding: &Funding, more: impl FnOnce() -> Option<usize>) -> Result<Self, Unfunded> {
         let charge = match &funding.0 {
             Some(funder) => {
-                let task = AsyncRuntimeOf::<C>::spawn_bytes::<T>().ok_or(Unfunded)?;
+                let task = spawned_bytes::<C, T>().ok_or(Unfunded)?;
                 let bytes = task.checked_add(more().ok_or(Unfunded)?).ok_or(Unfunded)?;
                 Some(Charge::take(funder, bytes).ok_or(Unfunded)?)
             }
@@ -219,15 +221,56 @@ where
         WatchOf::<C>::charged_channel(charge, init).map_err(|_| Unfunded)
     }
 
-    /// Spawns `future`, everything the runtime allocates for the task funded by what is left of
-    /// the charge and held until that is freed: refused as [`Unfunded`], `future` dropped and
-    /// nothing allocated, if what is left holds too few.
+    /// Spawns `future`, everything the runtime allocates for the task funded by its share of the
+    /// charge and held until that is freed, and what is left held by the task's future, after
+    /// `future`, to fund what `future` holds until that is freed: refused as [`Unfunded`],
+    /// `future` dropped before any of the charge goes back and nothing allocated, if what is left
+    /// holds too few.
     pub(crate) fn spawn(self, future: T) -> Result<JoinHandleOf<C, T::Output>, Unfunded> {
-        match self.charge {
-            Some(charge) => AsyncRuntimeOf::<C>::spawn_charged(charge, future).map_err(|_| Unfunded),
-            None => Ok(C::spawn(future)),
-        }
+        let Some(mut held) = self.charge else {
+            return Ok(C::spawn(future));
+        };
+        let Some(task) = spawned_bytes::<C, T>().and_then(|bytes| held.split(bytes)) else {
+            drop(future);
+            return Err(Unfunded);
+        };
+        AsyncRuntimeOf::<C>::spawn_charged(task, Charged::new(future, held)).map_err(|_| Unfunded)
     }
+}
+
+/// What the runtime charges a task running the future `task` makes, as [`TaskCharge::take`] asks
+/// it: the future's type named by the function that makes it.
+pub(crate) fn task_bytes<C, A, T>(_task: impl FnOnce(A) -> T) -> Option<usize>
+where
+    C: RaftTypeConfig,
+    T: Future + OptionalSend + 'static,
+    T::Output: OptionalSend + 'static,
+{
+    spawned_bytes::<C, T>()
+}
+
+/// What the runtime charges a task running `T` as [`TaskCharge::spawn`] spawns it, holding what
+/// is left of its charge after it.
+pub(crate) fn spawned_bytes<C, T>() -> Option<usize>
+where
+    C: RaftTypeConfig,
+    T: Future + OptionalSend + 'static,
+    T::Output: OptionalSend + 'static,
+{
+    AsyncRuntimeOf::<C>::spawn_bytes::<Charged<T>>()
+}
+
+/// The bytes an `Arc<T>` allocates for its block: its strong and weak counts, then the value,
+/// padded to the block's alignment.
+pub(crate) const fn arc_block_bytes<T>() -> usize {
+    let value = align_of::<T>();
+    let align = if value > align_of::<usize>() {
+        value
+    } else {
+        align_of::<usize>()
+    };
+    let offset = (2 * size_of::<usize>()).next_multiple_of(value);
+    (offset + size_of::<T>()).next_multiple_of(align)
 }
 
 const fn larger(a: usize, b: usize) -> usize {
@@ -303,16 +346,25 @@ const fn candidate_bytes<C: RaftTypeConfig>(voters: usize, learners: usize) -> u
 }
 
 /// What building a Leader for `voters` and `learners` allocates: the learner ids it collects, its
-/// replication progress and its clock progress.
+/// replication progress and its clock progress; and the targets it rebuilds its replication
+/// streams and heartbeat workers for, split from its charge as it rebuilds them.
 const fn leader_bytes<C: RaftTypeConfig>(voters: usize, learners: usize) -> usize {
     vec_bytes::<C::NodeId>(learners)
         + progress_bytes::<C::NodeId, ProgressEntry<C>>(voters, learners)
         + progress_bytes::<C::NodeId, ClockEntry<C>>(voters, learners)
+        + targets_bytes::<C>(learners)
+}
+
+/// The targets a Leader rebuilds its replication streams and heartbeat workers for, `targets` of
+/// them, each reserved exactly before any is pushed.
+pub(crate) const fn targets_bytes<C: RaftTypeConfig>(targets: usize) -> usize {
+    targets * size_of::<TargetProgress<C>>()
 }
 
 /// What rebuilding a Leader's progress of `tracked` entries for `voters` and `learners`
-/// allocates, the rebuilt progress included: the new learner ids and their copy, and per tracker
-/// a copy of the old one, the map its entries are moved into and the new tracker.
+/// allocates, the rebuilt progress included: the new learner ids and their copy, per tracker a
+/// copy of the old one, the map its entries are moved into and the new tracker, and the targets
+/// of the replication streams rebuilt for it.
 const fn rebuild_bytes<C: RaftTypeConfig>(tracked: usize, voters: usize, learners: usize) -> usize {
     2 * vec_bytes::<C::NodeId>(learners)
         + vec_bytes::<ProgressEntry<C>>(tracked)
@@ -321,6 +373,7 @@ const fn rebuild_bytes<C: RaftTypeConfig>(tracked: usize, voters: usize, learner
         + vec_bytes::<ClockEntry<C>>(tracked)
         + map_bytes::<C::NodeId, ClockEntry<C>>(tracked)
         + progress_bytes::<C::NodeId, ClockEntry<C>>(voters, learners)
+        + targets_bytes::<C>(learners)
 }
 
 /// At most how many voters and learners a proposer built from `membership` tracks: its distinct

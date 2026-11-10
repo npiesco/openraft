@@ -24,6 +24,7 @@ use std::time::Duration;
 use display_more::DisplayOptionExt;
 use futures_util::FutureExt;
 use futures_util::StreamExt;
+use openraft_macros::since;
 use payload::Payload;
 use replication_progress::ReplicationProgress;
 pub(crate) use replication_session_id::ReplicationSessionId;
@@ -33,12 +34,13 @@ pub(crate) use response::Progress;
 pub(crate) const EXHAUSTED_BACKOFF_DELAY: Duration = Duration::from_millis(500);
 use response::ReplicationResult;
 use stream_state::StreamState;
-use tracing::Instrument;
 
+use crate::OptionalSend;
 use crate::RaftNetworkFactory;
 use crate::RaftTypeConfig;
 use crate::async_runtime::Mutex;
 use crate::async_runtime::Select2;
+use crate::async_runtime::watch::Watch;
 use crate::async_runtime::watch::WatchReceiver;
 use crate::base::BoxStream;
 use crate::core::notification::Notification;
@@ -51,6 +53,8 @@ use crate::network::NetBackoff;
 use crate::network::NetStreamAppend;
 use crate::network::RPCOption;
 use crate::progress::inflight_id::InflightId;
+use crate::proposer::funding::arc_block_bytes;
+use crate::proposer::funding::spawned_bytes;
 use crate::raft::AppendEntriesRequest;
 use crate::raft::StreamAppendError;
 use crate::raft::StreamAppendResult;
@@ -58,16 +62,64 @@ use crate::raft_state::IOId;
 use crate::replication::backoff_state::BackoffState;
 use crate::replication::event_watcher::EventWatcher;
 use crate::replication::inflight_append_queue::InflightAppendQueue;
+use crate::replication::replicate::Replicate;
 use crate::replication::replication_context::ReplicationContext;
 use crate::replication::stream_context::StreamContext;
 use crate::storage::RaftLogStorage;
 use crate::type_config::TypeConfigExt;
 use crate::type_config::alias::InstantOf;
-use crate::type_config::alias::JoinHandleOf;
 use crate::type_config::alias::LogIdOf;
 use crate::type_config::alias::MutexOf;
+use crate::type_config::alias::WatchOf;
 use crate::type_config::alias::WatchReceiverOf;
 use crate::type_config::async_runtime::mpsc::MpscSender;
+
+/// The bytes a Leader charges for each replication stream it runs to another member, replicating
+/// through clients of `NF` the logs of `LS`, before any of the stream is made: its task,
+/// everything the runtime allocates for it, the state its task shares with the requests it
+/// streams, its backoff, and the channels that stop it, end its backoff and send it what to
+/// replicate, each held until it is freed. The client is not among them: it funds its own
+/// allocations. A node run with a funder holds two streams charged at once per other member while
+/// it rebuilds its streams, as a replaced stream's task may still run until it sees it is
+/// stopped.
+///
+/// `None` if the runtime cannot fund its tasks or channels now, as
+/// [`AsyncRuntime::spawn_bytes`](crate::async_runtime::AsyncRuntime::spawn_bytes) tells: a funded
+/// Leader runs no replication stream then.
+#[since(version = "0.10.0")]
+pub fn replication_stream_bytes<C, NF, LS>() -> Option<usize>
+where
+    C: RaftTypeConfig,
+    NF: RaftNetworkFactory<C>,
+    LS: RaftLogStorage<C>,
+{
+    instrumented_task_bytes::<C, _, _>(ReplicationCore::<C, NF, LS>::main)?.checked_add(stream_parts_bytes::<C, LS>()?)
+}
+
+/// What the runtime charges a task running, in a span, the future `task` makes, as
+/// [`TaskCharge::take`](crate::proposer::funding::TaskCharge::take) asks it.
+fn instrumented_task_bytes<C, A, T>(_task: impl FnOnce(A) -> T) -> Option<usize>
+where
+    C: RaftTypeConfig,
+    T: Future + OptionalSend + 'static,
+    T::Output: OptionalSend + 'static,
+{
+    spawned_bytes::<C, tracing::instrument::Instrumented<T>>()
+}
+
+/// What a replication stream holds besides its task: the blocks of the channels that send it what
+/// to replicate, end its backoff and stop it, and those of the state its task shares with the
+/// requests it streams and of its backoff, freed with its task.
+pub(crate) fn stream_parts_bytes<C, LS>() -> Option<usize>
+where
+    C: RaftTypeConfig,
+    LS: RaftLogStorage<C>,
+{
+    let replicate = WatchOf::<C>::block_bytes::<Replicate<C>>()?;
+    let signals = WatchOf::<C>::block_bytes::<()>()?.checked_mul(2)?;
+    let shared = arc_block_bytes::<MutexOf<C, StreamState<C, LS>>>() + BackoffState::block_bytes();
+    replicate.checked_add(signals)?.checked_add(shared)
+}
 
 /// The error rank that a stream session adds when the target accepted none of the entries it sent.
 ///
@@ -124,20 +176,19 @@ where
     N: RaftNetworkFactory<C>,
     LS: RaftLogStorage<C>,
 {
-    /// Spawn a new replication task for the target node.
+    /// A replication task for the target node, not yet spawned: run [`main`](Self::main) in a
+    /// span to spawn it.
     #[tracing::instrument(level = "trace", skip_all, fields(context=display(&replication_context)
     ))]
     #[allow(clippy::type_complexity)]
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn spawn(
+    pub(crate) fn new(
         replication_context: ReplicationContext<C>,
         progress: ReplicationProgress<C>,
         network: N::Network,
         log_reader: LS::LogReader,
         event_watcher: EventWatcher<C>,
         backoff_reset_rx: WatchReceiverOf<C, ()>,
-        span: tracing::Span,
-    ) -> JoinHandleOf<C, Result<(), ReplicationClosed>> {
+    ) -> Self {
         tracing::debug!(
             "spawn replication: session_id={}, target={}, committed={}, matching={}",
             replication_context.stream_id,
@@ -149,7 +200,7 @@ where
         let backoff_state = BackoffState::new();
         let backoff_consumer = backoff_state.consumer(backoff_reset_rx);
 
-        let this = Self {
+        Self {
             replication_context: replication_context.clone(),
             stream_state: Arc::new(C::mutex(StreamState {
                 replication_context,
@@ -165,9 +216,7 @@ where
             replication_progress: progress,
             backoff_state,
             next_action: None,
-        };
-
-        C::spawn(this.main().instrument(span))
+        }
     }
 
     /// Creates a stream of AppendEntries requests from the given context.
@@ -204,7 +253,7 @@ where
     }
 
     /// Main replication loop that sends AppendEntries requests and processes responses.
-    async fn main(mut self) -> Result<(), ReplicationClosed> {
+    pub(crate) async fn main(mut self) -> Result<(), ReplicationClosed> {
         // Avoid holding a mut ref to self during streaming.
         let mut network = self.network.take().unwrap();
 

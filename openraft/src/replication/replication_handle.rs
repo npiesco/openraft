@@ -1,12 +1,23 @@
+use openraft_macros::since;
 use rt::WatchSender;
 
 use crate::RaftTypeConfig;
 use crate::errors::ReplicationClosed;
 use crate::progress::stream_id::StreamId;
+use crate::proposer::funding::tree_bytes;
 use crate::replication::replicate::Replicate;
 use crate::replication::snapshot_transmitter_handle::SnapshotTransmitterHandle;
 use crate::type_config::alias::JoinHandleOf;
 use crate::type_config::alias::WatchSenderOf;
+
+/// The bytes a Leader's map of its replication streams is charged, for `members` other members:
+/// the tree's nodes, charged before it is built and held until they are freed. A node run with a
+/// funder holds two such maps charged at once while it rebuilds its streams, the one it builds and
+/// the one it replaces.
+#[since(version = "0.10.0")]
+pub const fn replication_map_bytes<C: RaftTypeConfig>(members: usize) -> usize {
+    tree_bytes::<C::NodeId, ReplicationHandle<C>>(members)
+}
 
 /// The handle to a spawned replication stream.
 pub(crate) struct ReplicationHandle<C>
@@ -24,8 +35,9 @@ where C: RaftTypeConfig
     /// Sender for the backoff reset signal; sending on it ends the active backoff of replication.
     pub(crate) backoff_reset_tx: WatchSenderOf<C, ()>,
 
-    /// The spawn handle of the `ReplicationCore` task.
-    pub(crate) join_handle: Option<JoinHandleOf<C, Result<(), ReplicationClosed>>>,
+    /// The spawn handle of the `ReplicationCore` task: dropped, the task runs on until it sees it
+    /// is stopped, and is not joined.
+    pub(crate) _join_handle: JoinHandleOf<C, Result<(), ReplicationClosed>>,
 
     /// Handle to the snapshot transmitter task, if one is running.
     pub(crate) snapshot_transmit_handle: Option<SnapshotTransmitterHandle<C>>,
@@ -39,10 +51,11 @@ where C: RaftTypeConfig
         replicate_tx: WatchSenderOf<C, Replicate<C>>,
         cancel_tx: WatchSenderOf<C, ()>,
         backoff_reset_tx: WatchSenderOf<C, ()>,
+        join_handle: JoinHandleOf<C, Result<(), ReplicationClosed>>,
     ) -> Self {
         Self {
             stream_id,
-            join_handle: None,
+            _join_handle: join_handle,
             replicate_tx,
             snapshot_transmit_handle: None,
             cancel_tx,

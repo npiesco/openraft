@@ -372,11 +372,28 @@ where
     }
 
     /// Update replication streams to reflect replication progress change.
+    ///
+    /// The targets are reserved exactly, charged before by the part of the Leader's charge split
+    /// for them, which travels with them until they are freed; their nodes are not copied.
     #[tracing::instrument(level = "debug", skip_all)]
     pub(crate) fn rebuild_replication_streams(&mut self, close_old: bool) {
-        let mut targets = vec![];
+        let id = &self.config.id;
+        let count = self.leader.progress.iter().filter(|item| &item.id != id).count();
 
-        let membership = self.state.membership_state.effective();
+        let funding = match self.leader.charge.as_mut() {
+            Some(charge) => {
+                let split = charge.split(funding::targets_bytes::<C>(count));
+                debug_assert!(split.is_some(), "a Leader is charged the targets it rebuilds");
+                split
+            }
+            None => None,
+        };
+
+        let mut targets = Vec::new();
+        if targets.try_reserve_exact(count).is_err() {
+            tracing::warn!("no replication streams rebuilt: their targets could not be allocated");
+            return;
+        }
 
         for item in self.leader.progress.iter_mut_without_reorder() {
             if item.id != self.config.id {
@@ -384,11 +401,8 @@ where
                     item.data.inflight = Inflight::None;
                 }
 
-                let target_node = membership.get_node(&item.id).unwrap().clone();
-
                 targets.push(TargetProgress {
                     target: item.id.clone(),
-                    target_node,
                     progress: item.clone(),
                 });
             }
@@ -397,6 +411,7 @@ where
             leader_vote: self.leader.committed_vote.clone(),
             targets,
             close_old_streams: close_old,
+            funding,
         });
     }
 

@@ -7,6 +7,7 @@ use display_more::DisplaySliceExt;
 
 use crate::OptionalSend;
 use crate::RaftTypeConfig;
+use crate::async_runtime::Charge;
 use crate::async_runtime::OneshotSender;
 use crate::core::sm;
 use crate::engine::CommandKind;
@@ -140,6 +141,10 @@ where
         /// If vote changes, old should be closed;
         /// If only membership changes, old should be kept.
         close_old_streams: bool,
+
+        /// What `targets` was charged before it was built, split from the Leader's charge, held
+        /// with it, declared after it, until it is freed.
+        funding: Option<Charge>,
     },
 
     /// Save vote to storage
@@ -244,6 +249,7 @@ where
                 leader_vote,
                 targets,
                 close_old_streams,
+                ..
             } => {
                 write!(
                     f,
@@ -292,7 +298,7 @@ where
             (Command::SaveCommittedAndApply { already_applied: already_committed, upto, },      Command::SaveCommittedAndApply { already_applied: b_committed, upto: b_upto, }, )  => already_committed == b_committed && upto == b_upto,
             (Command::Replicate { target, req },               Command::Replicate { target: b_target, req: other_req, }, )           => target == b_target && req == other_req,
             (Command::BroadcastTransferLeader { req },         Command::BroadcastTransferLeader { req: b, }, )                       => req == b,
-            (Command::RebuildReplicationStreams { leader_vote, targets, close_old_streams },   Command::RebuildReplicationStreams { leader_vote: lb, targets: b, close_old_streams: cb }, ) => leader_vote == lb && targets == b && close_old_streams == cb,
+            (Command::RebuildReplicationStreams { leader_vote, targets, close_old_streams, .. },   Command::RebuildReplicationStreams { leader_vote: lb, targets: b, close_old_streams: cb, .. }, ) => leader_vote == lb && targets == b && close_old_streams == cb,
             (Command::SaveVote { vote },                       Command::SaveVote { vote: b })                                        => vote == b,
             (Command::SendVote { vote_req },                   Command::SendVote { vote_req: b }, )                                  => vote_req == b,
             (Command::SendPreVote { vote_req },                Command::SendPreVote { vote_req: b }, )                               => vote_req == b,

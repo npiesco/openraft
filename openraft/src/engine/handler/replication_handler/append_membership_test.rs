@@ -90,17 +90,16 @@ fn test_leader_append_membership_for_leader() -> anyhow::Result<()> {
                 targets: vec![
                     TargetProgress {
                         target: 3,
-                        target_node: (),
                         progress: ProgressEntry::empty(3, StreamId::new(2), 0),
                     },
                     TargetProgress {
                         target: 4,
-                        target_node: (),
                         progress: ProgressEntry::empty(4, StreamId::new(3), 0),
                     }
                 ], /* node-2 is leader,
                     * won't be removed */
                 close_old_streams: false,
+                funding: None,
             },
             // Pipeline mode kicks in for new followers
             Command::Replicate {

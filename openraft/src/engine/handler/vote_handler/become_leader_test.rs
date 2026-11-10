@@ -72,10 +72,10 @@ fn test_become_leader() -> anyhow::Result<()> {
             leader_vote: Vote::new(2, 1).to_committed(),
             targets: vec![TargetProgress {
                 target: 0,
-                target_node: (),
                 progress: ProgressEntry::empty(0, StreamId::new(1), 0),
             }],
             close_old_streams: true,
+            funding: None,
         },
         Command::AppendEntries {
             committed_vote: Vote::new(2, 1).to_committed(),

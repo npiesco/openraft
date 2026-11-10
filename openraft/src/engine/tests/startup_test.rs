@@ -80,10 +80,10 @@ fn test_startup_as_leader_without_logs() -> anyhow::Result<()> {
                 leader_vote: Vote::new(2, 2).to_committed(),
                 targets: vec![TargetProgress {
                     target: 3,
-                    target_node: (),
                     progress: ProgressEntry::empty(3, StreamId::new(2), 4),
                 }],
                 close_old_streams: true,
+                funding: None,
             },
             Command::AppendEntries {
                 committed_vote: Vote::new(2, 2).to_committed(),
@@ -134,10 +134,10 @@ fn test_startup_as_leader_with_proposed_logs() -> anyhow::Result<()> {
                 leader_vote: Vote::new(1, 2).to_committed(),
                 targets: vec![TargetProgress {
                     target: 3,
-                    target_node: (),
                     progress: ProgressEntry::empty(3, StreamId::new(2), 7),
                 }],
                 close_old_streams: true,
+                funding: None,
             },
             Command::Replicate {
                 target: 3,
