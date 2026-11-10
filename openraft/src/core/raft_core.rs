@@ -445,12 +445,22 @@ where
             return;
         }
 
+        // What the read takes of the queue is charged before anything is done for it: refused, it
+        // is answered `Unfunded`, neither queued nor heartbeat sent for.
+        let funding = match PendingReadQueue::<C>::charge(&lh.config.funding) {
+            Ok(funding) => funding,
+            Err(unfunded) => {
+                tx.send(Err(LinearizableReadError::Unfunded(unfunded))).ok();
+                return;
+            }
+        };
+
         if linearizer_option.heartbeat_if_quorum_ack_stale {
             lh.send_heartbeat(true);
         }
 
         let deadline = now + wait_timeout;
-        let pending_read = PendingRead::new(deadline, linearizer, tx);
+        let pending_read = PendingRead::new(deadline, linearizer, tx, funding);
         self.pending_reads.push(min_quorum_acked_at, pending_read);
         self.reschedule_pending_read_check();
     }
@@ -2323,7 +2333,11 @@ where
     ///
     /// This method validates the session and sends heartbeat events only if the current
     /// session matches the requested session (no leader change or membership change).
-    fn broadcast_heartbeat(&mut self, session_id: ReplicationSessionId<C>, bypass_min_interval: bool) {
+    ///
+    /// The heartbeat workers the last rebuild was refused the funding of are spawned again first,
+    /// so a target left without its worker by a refusal is sent this heartbeat once funding is
+    /// restored.
+    async fn broadcast_heartbeat(&mut self, session_id: ReplicationSessionId<C>, bypass_min_interval: bool) {
         // Lazy get the progress data for heartbeat. If the leader changes or replication
         // config changes, no need to send heartbeat.
         let Ok(lh) = self.engine.try_leader_handler() else {
@@ -2333,12 +2347,28 @@ where
 
         let committed_vote = lh.leader.committed_vote.clone();
         let membership_log_id = lh.state.membership_state.effective().log_id();
-        let current_session_id = ReplicationSessionId::new(committed_vote, membership_log_id.clone());
+        let current_session_id = ReplicationSessionId::new(committed_vote.clone(), membership_log_id.clone());
 
         if current_session_id != session_id {
             // Session changed, skip heartbeat
             return;
         }
+
+        if self.heartbeat_handle.has_unspawned() {
+            let mut factory = self.network_factory.lock().await;
+            self.heartbeat_handle
+                .spawn_unspawned::<NF>(
+                    committed_vote,
+                    &mut *factory,
+                    &self.tx_notification,
+                    &self.engine.config.funding,
+                )
+                .await;
+        }
+
+        let Ok(lh) = self.engine.try_leader_handler() else {
+            return;
+        };
 
         let cluster_committed = lh.state.cluster_committed().cloned();
         let now = C::now();
@@ -2616,7 +2646,7 @@ where
         targets: Vec<TargetProgress<C>>,
         close_old_streams: bool,
     ) {
-        {
+        let heartbeats_complete = {
             let mut factory = self.network_factory.lock().await;
             self.heartbeat_handle
                 .spawn_workers::<NF>(
@@ -2627,8 +2657,8 @@ where
                     close_old_streams,
                     &self.engine.config.funding,
                 )
-                .await;
-        }
+                .await
+        };
 
         let mut new_replications = BTreeMap::new();
 
@@ -2661,6 +2691,11 @@ where
 
         for (target, s) in left {
             Self::close_replication(&target, s);
+        }
+
+        // Kept, not copied, for the heartbeat workers refused their funding to be spawned again.
+        if !heartbeats_complete {
+            self.heartbeat_handle.keep_unspawned(targets);
         }
     }
 
@@ -2745,7 +2780,7 @@ where
             Command::BroadcastHeartbeat {
                 session_id,
                 bypass_min_interval,
-            } => self.broadcast_heartbeat(session_id, bypass_min_interval),
+            } => self.broadcast_heartbeat(session_id, bypass_min_interval).await,
             Command::SaveCommittedAndApply { already_applied, upto } => {
                 self.run_save_committed_and_apply(already_applied, upto).await?
             }

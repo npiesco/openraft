@@ -48,9 +48,6 @@ where
 
     pub(crate) target: C::NodeId,
 
-    #[allow(dead_code)]
-    pub(crate) node: C::Node,
-
     pub(crate) config: Arc<Config>,
 
     /// For sending back result to the [`RaftCore`].
@@ -114,7 +111,8 @@ where
                 entries: Default::default(),
             };
 
-            let input_stream = Box::pin(futures_util::stream::once(async { payload }));
+            // A ready future is `Unpin`, so the one-request stream needs no box.
+            let input_stream = futures_util::stream::once(futures_util::future::ready(payload));
 
             let res = C::timeout(timeout, async {
                 let mut output = self.network.stream_append(input_stream, option).await?.fuse();
@@ -307,7 +305,6 @@ mod tests {
                         drained: drained.clone(),
                     },
                     target: 2,
-                    node: (),
                     config: Arc::new(Config::default()),
                     tx_notification,
                 };

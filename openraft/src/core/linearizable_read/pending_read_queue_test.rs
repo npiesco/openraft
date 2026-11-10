@@ -5,7 +5,9 @@ use crate::engine::testing::UTConfig;
 use crate::engine::testing::log_id;
 use crate::errors::ForwardToLeader;
 use crate::errors::LinearizableReadError;
+use crate::errors::Unfunded;
 use crate::proposer::SendStamp;
+use crate::proposer::funding::testing::Limit;
 use crate::raft::linearizable_read::Linearizer;
 use crate::raft::linearizable_read::ReadLogId;
 use crate::type_config::TypeConfigExt;
@@ -32,7 +34,7 @@ struct PendingReadSpec {
 fn push_read(queue: &mut PendingReadQueue<C>, read_log_id: &ReadLogId<C>, spec: PendingReadSpec) -> ReadRx {
     let (tx, rx) = C::oneshot();
     let linearizer = Linearizer::new(spec.node_id, *read_log_id, None);
-    let pending_read = PendingRead::new(spec.deadline, linearizer, tx);
+    let pending_read = PendingRead::new(spec.deadline, linearizer, tx, None);
     queue.push(stamp(spec.min_quorum_acked_at), pending_read);
     rx
 }
@@ -54,7 +56,7 @@ fn test_drain_all_with_error() {
 
     for _ in 0..2 {
         let (tx, rx) = C::oneshot::<ReadResult>();
-        let pending_read = PendingRead::new(now, linearizer.clone(), tx);
+        let pending_read = PendingRead::new(now, linearizer.clone(), tx, None);
         queue.push(stamp(now), pending_read);
         receivers.push(rx);
     }
@@ -324,4 +326,44 @@ fn test_satisfied_takes_precedence_over_expired() {
 
     assert_linearizer(&mut rx, 1, &read_log_id);
     assert!(queue.is_empty());
+}
+
+/// A read is charged the queue's nodes it takes before it is queued: refused, nothing is charged
+/// and it is not queued; queued, its charge is held until it is answered and those nodes are
+/// freed, by draining or by dropping the queue, and then a read is funded again.
+#[test]
+fn test_a_reads_charge_is_held_until_its_nodes_are_freed() {
+    let read_log_id = ReadLogId::from_log_id(log_id(1, 1, 1));
+    let now = C::now();
+    let push = |queue: &mut PendingReadQueue<C>, funding| {
+        let (tx, rx) = C::oneshot::<ReadResult>();
+        let pending_read = PendingRead::new(now, Linearizer::new(1, read_log_id, None), tx, funding);
+        queue.push(stamp(now), pending_read);
+        rx
+    };
+
+    let unlimited = Limit::new(usize::MAX);
+    let one = PendingReadQueue::<C>::charge(&unlimited.funding()).unwrap();
+    let read_bytes = unlimited.held();
+    assert!(read_bytes > 0);
+    drop(one);
+    assert_eq!(0, unlimited.held());
+
+    let limit = Limit::new(read_bytes);
+    let funding = limit.funding();
+    let mut queue = PendingReadQueue::<C>::default();
+    let first = PendingReadQueue::<C>::charge(&funding).unwrap();
+    let mut rx = push(&mut queue, first);
+    assert!(matches!(PendingReadQueue::<C>::charge(&funding), Err(Unfunded)));
+    assert_eq!(read_bytes, limit.held(), "a refused read is charged nothing");
+
+    queue.drain_satisfied(stamp(now + CLOCK_ADVANCE), None);
+    assert_linearizer(&mut rx, 1, &read_log_id);
+    assert_eq!(0, limit.held(), "an answered read's charge goes back");
+
+    let again = PendingReadQueue::<C>::charge(&funding).unwrap();
+    let _rx = push(&mut queue, again);
+    assert_eq!(read_bytes, limit.held());
+    drop(queue);
+    assert_eq!(0, limit.held(), "a dropped queue's reads' charges go back");
 }

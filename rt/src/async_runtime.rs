@@ -14,6 +14,7 @@ use std::time::Duration;
 
 use openraft_macros::since;
 
+use crate::Charge;
 use crate::Instant;
 use crate::Mpsc;
 use crate::MpscReceiver;
@@ -72,6 +73,36 @@ pub trait AsyncRuntime: Debug + 'static {
     where
         T: Future + OptionalSend + 'static,
         T::Output: OptionalSend + 'static;
+
+    /// The bytes [`spawn_charged`](Self::spawn_charged) charges a task running `T` before it
+    /// is made: everything the runtime allocates for it until its handle and the task are gone.
+    ///
+    /// `None` if the runtime cannot fund its tasks, which by default it cannot, or cannot run a
+    /// funded task now: asked first, a refused spawn is refused before anything is made for it.
+    #[since(version = "0.10.0")]
+    fn spawn_bytes<T>() -> Option<usize>
+    where
+        T: Future + OptionalSend + 'static,
+        T::Output: OptionalSend + 'static,
+    {
+        None
+    }
+
+    /// Spawns a new task like [`spawn`](Self::spawn), everything the runtime allocates for it
+    /// funded by `charge`, taken before for [`spawn_bytes`](Self::spawn_bytes), and held until
+    /// that is freed.
+    ///
+    /// `future` is given back, nothing allocated and `charge` credited back, if `charge` does not
+    /// hold the task's bytes or the runtime cannot fund its tasks, which by default it cannot.
+    #[since(version = "0.10.0")]
+    fn spawn_charged<T>(charge: Charge, future: T) -> Result<Self::JoinHandle<T::Output>, T>
+    where
+        T: Future + OptionalSend + 'static,
+        T::Output: OptionalSend + 'static,
+    {
+        drop(charge);
+        Err(future)
+    }
 
     /// Wait until `duration` has elapsed.
     #[track_caller]

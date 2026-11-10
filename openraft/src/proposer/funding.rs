@@ -7,6 +7,7 @@
 //! [`run`](crate::Raft::run) without a funder charges nothing.
 
 use std::fmt;
+use std::future::Future;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
@@ -14,10 +15,13 @@ use openraft_macros::since;
 
 use crate::Membership;
 use crate::OptionalSend;
+use crate::OptionalSync;
 use crate::RaftTypeConfig;
+use crate::async_runtime::AsyncRuntime;
 use crate::async_runtime::Charge;
 use crate::async_runtime::Funder;
 use crate::async_runtime::Oneshot;
+use crate::async_runtime::watch::Watch;
 use crate::errors::Unfunded;
 use crate::node::Node;
 use crate::node::NodeId;
@@ -25,10 +29,15 @@ use crate::progress::IdVal;
 use crate::progress::entry::ProgressEntry;
 use crate::proposer::SendStamp;
 use crate::type_config::TypeConfigExt;
+use crate::type_config::alias::AsyncRuntimeOf;
 use crate::type_config::alias::InstantOf;
+use crate::type_config::alias::JoinHandleOf;
 use crate::type_config::alias::OneshotOf;
 use crate::type_config::alias::OneshotReceiverOf;
 use crate::type_config::alias::OneshotSenderOf;
+use crate::type_config::alias::WatchOf;
+use crate::type_config::alias::WatchReceiverOf;
+use crate::type_config::alias::WatchSenderOf;
 
 /// The funder a node's proposer state is charged to, if the node was run with one.
 #[derive(Clone, Default)]
@@ -141,6 +150,86 @@ where
     }
 }
 
+/// A task running `T` yet to be spawned, and what it holds, charged to a node's funder before any
+/// of it is made; uncharged on a node run unfunded. Each part is made from its share of the
+/// charge, which is held by the part until it is freed; dropped, what it still holds is credited
+/// back.
+pub(crate) struct TaskCharge<C, T> {
+    charge: Option<Charge>,
+    _task: PhantomData<fn() -> (C, T)>,
+}
+
+impl<C, T> TaskCharge<C, T>
+where
+    C: RaftTypeConfig,
+    T: Future + OptionalSend + 'static,
+    T::Output: OptionalSend + 'static,
+{
+    /// The task's own allocations and `more` bytes of what it holds, charged to `funding`'s
+    /// funder before any of them is made: refused as [`Unfunded`], nothing charged, if the funder
+    /// refuses them, or the runtime cannot fund tasks or a part `more` sizes, which it tells by
+    /// `None`. `more` is asked only of a funded node.
+    pub(crate) fn take(funding: &Funding, more: impl FnOnce() -> Option<usize>) -> Result<Self, Unfunded> {
+        let charge = match &funding.0 {
+            Some(funder) => {
+                let task = AsyncRuntimeOf::<C>::spawn_bytes::<T>().ok_or(Unfunded)?;
+                let bytes = task.checked_add(more().ok_or(Unfunded)?).ok_or(Unfunded)?;
+                Some(Charge::take(funder, bytes).ok_or(Unfunded)?)
+            }
+            None => None,
+        };
+        Ok(Self {
+            charge,
+            _task: PhantomData,
+        })
+    }
+
+    /// `bytes` of the charge split off for a part the task holds, to be held with that part
+    /// until it is freed: refused as [`Unfunded`] if the charge holds fewer; `None` unfunded.
+    pub(crate) fn split(&mut self, bytes: usize) -> Result<Option<Charge>, Unfunded> {
+        match &mut self.charge {
+            Some(charge) => charge.split(bytes).map(Some).ok_or(Unfunded),
+            None => Ok(None),
+        }
+    }
+
+    /// A oneshot channel the task holds, its block funded by its share of the charge, held until
+    /// both halves are dropped and the block is freed: refused as [`Unfunded`], nothing made, if
+    /// the charge holds too few.
+    pub(crate) fn oneshot<U>(&mut self) -> Result<(OneshotSenderOf<C, U>, OneshotReceiverOf<C, U>), Unfunded>
+    where U: OptionalSend {
+        if self.charge.is_none() {
+            return Ok(C::oneshot());
+        }
+        let block = OneshotOf::<C>::block_bytes::<U>().ok_or(Unfunded)?;
+        let charge = self.split(block)?.ok_or(Unfunded)?;
+        OneshotOf::<C>::charged_channel(charge).map_err(|_| Unfunded)
+    }
+
+    /// A watch channel the task holds, starting at `init`, its block funded by its share of the
+    /// charge, held until every handle is dropped and the block is freed: refused as
+    /// [`Unfunded`], nothing made, if the charge holds too few.
+    pub(crate) fn watch<U>(&mut self, init: U) -> Result<(WatchSenderOf<C, U>, WatchReceiverOf<C, U>), Unfunded>
+    where U: OptionalSend + OptionalSync {
+        if self.charge.is_none() {
+            return Ok(C::watch_channel(init));
+        }
+        let block = WatchOf::<C>::block_bytes::<U>().ok_or(Unfunded)?;
+        let charge = self.split(block)?.ok_or(Unfunded)?;
+        WatchOf::<C>::charged_channel(charge, init).map_err(|_| Unfunded)
+    }
+
+    /// Spawns `future`, everything the runtime allocates for the task funded by what is left of
+    /// the charge and held until that is freed: refused as [`Unfunded`], `future` dropped and
+    /// nothing allocated, if what is left holds too few.
+    pub(crate) fn spawn(self, future: T) -> Result<JoinHandleOf<C, T::Output>, Unfunded> {
+        match self.charge {
+            Some(charge) => AsyncRuntimeOf::<C>::spawn_charged(charge, future).map_err(|_| Unfunded),
+            None => Ok(C::spawn(future)),
+        }
+    }
+}
+
 const fn larger(a: usize, b: usize) -> usize {
     if a > b { a } else { b }
 }
@@ -162,19 +251,24 @@ const fn sort_bytes<T>(len: usize) -> usize {
 /// Every node a B-tree map of at most `len` entries of `K` and `V` (a set has `V = ()`) holds,
 /// whether built by inserts or in bulk from sorted entries: every node but the root holds at
 /// least five entries, so there are at most `len / 5 + 1` leaves and no more internal nodes than
-/// leaves. Each is charged as an internal node, the larger: a parent link, its index and length,
-/// eleven keys and eleven values each padded to its alignment, and twelve child links, padded to
-/// the largest alignment.
-const fn tree_bytes<K, V>(len: usize) -> usize {
+/// leaves, each charged as [`tree_node_bytes`].
+pub(crate) const fn tree_bytes<K, V>(len: usize) -> usize {
+    2 * (len / 5 + 1) * tree_node_bytes::<K, V>()
+}
+
+/// One node of a B-tree map of `K` and `V`, charged as an internal node, the larger: a parent
+/// link, its index and length, eleven keys and eleven values each padded to its alignment, and
+/// twelve child links, padded to the largest alignment. A map of one entry or more holds no more
+/// nodes than entries, as every node holds at least one; an emptied map keeps its root until it
+/// is replaced.
+pub(crate) const fn tree_node_bytes<K, V>() -> usize {
     let link = size_of::<usize>();
-    let node = link
-        + 2 * size_of::<u16>()
+    link + 2 * size_of::<u16>()
         + 11 * (size_of::<K>() + size_of::<V>())
         + align_of::<K>()
         + align_of::<V>()
         + 12 * link
-        + larger(link, larger(align_of::<K>(), align_of::<V>()));
-    2 * (len / 5 + 1) * node
+        + larger(link, larger(align_of::<K>(), align_of::<V>()))
 }
 
 /// What collecting at most `len` items into a `BTreeSet<T>` allocates: std collects them into a

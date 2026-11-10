@@ -7,6 +7,7 @@ use openraft_macros::since;
 pub use watch_error::RecvError;
 pub use watch_error::SendError;
 
+use crate::Charge;
 use crate::OptionalSend;
 use crate::OptionalSync;
 
@@ -55,6 +56,30 @@ pub trait Watch: Sized {
     /// intermediate values should be dropped.
     #[track_caller]
     fn channel<T: OptionalSend + OptionalSync>(init: T) -> (Self::Sender<T>, Self::Receiver<T>);
+
+    /// The bytes of the shared block a channel carrying `T` allocates, which a funded channel is
+    /// charged before it is made: see [`charged_channel`](Self::charged_channel).
+    ///
+    /// `None` if the runtime cannot fund its channels, which by default it cannot.
+    #[since(version = "0.10.0")]
+    fn block_bytes<T: OptionalSend + OptionalSync>() -> Option<usize> {
+        None
+    }
+
+    /// Creates a watch channel like [`channel`](Self::channel), its shared block funded by
+    /// `charge`, taken before for [`block_bytes`](Self::block_bytes), and held until every handle
+    /// is dropped and the block is freed: nothing else is allocated for the channel while it
+    /// lives.
+    ///
+    /// `charge` and `init` are given back, with nothing allocated, if `charge` does not hold the
+    /// block's bytes or the runtime cannot fund its channels, which by default it cannot.
+    #[since(version = "0.10.0")]
+    fn charged_channel<T: OptionalSend + OptionalSync>(
+        charge: Charge,
+        init: T,
+    ) -> Result<(Self::Sender<T>, Self::Receiver<T>), (Charge, T)> {
+        Err((charge, init))
+    }
 }
 
 /// Sends values to the associated Receiver.

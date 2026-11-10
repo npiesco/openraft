@@ -124,6 +124,7 @@ pub use crate::config::ConfigError;
 pub use crate::config::SnapshotPolicy;
 pub use crate::config::StepDownPolicy;
 pub use crate::core::ServerState;
+pub use crate::core::heartbeat::handle::heartbeat_map_bytes;
 pub use crate::entry::Entry;
 pub use crate::entry::EntryPayload;
 pub use crate::extensions::Extensions;

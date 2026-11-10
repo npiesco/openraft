@@ -6,8 +6,13 @@ use super::pending_read::PendingRead;
 use super::pending_read_deadline_key::PendingReadDeadlineKey;
 use super::pending_read_key::PendingReadKey;
 use crate::RaftTypeConfig;
+use crate::async_runtime::Charge;
+use crate::core::raft_msg::ClientReadTx;
 use crate::errors::LinearizableReadError;
+use crate::errors::Unfunded;
 use crate::proposer::SendStamp;
+use crate::proposer::funding;
+use crate::proposer::funding::Funding;
 use crate::type_config::alias::InstantOf;
 use crate::type_config::alias::LogIdOf;
 
@@ -31,6 +36,19 @@ where C: RaftTypeConfig
 impl<C> PendingReadQueue<C>
 where C: RaftTypeConfig
 {
+    /// The nodes one read can add to the queue's maps, one in each: a map of one entry or more
+    /// holds no more nodes than entries.
+    const READ_BYTES: usize = funding::tree_node_bytes::<PendingReadKey<SendStamp<InstantOf<C>>>, PendingRead<C>>()
+        + funding::tree_node_bytes::<PendingReadDeadlineKey<InstantOf<C>>, PendingReadKey<SendStamp<InstantOf<C>>>>();
+
+    /// What one more read takes of the queue, charged to `funding` before it is queued and held
+    /// by the read ([`PendingRead::new`]) until the queue has freed the nodes it took: refused as
+    /// [`Unfunded`], nothing charged, and the read must not be queued.
+    pub(crate) fn charge(funding: &Funding) -> Result<Option<Charge>, Unfunded> {
+        funding.charge(Self::READ_BYTES)
+    }
+
+    /// Queues `pending_read`, which holds its charge from [`charge`](Self::charge).
     pub(crate) fn push(&mut self, min_quorum_acked_at: SendStamp<InstantOf<C>>, pending_read: PendingRead<C>) {
         let sequence = self.next_sequence;
         self.next_sequence = sequence.checked_add(1).expect("pending read sequence overflow");
@@ -61,6 +79,7 @@ where C: RaftTypeConfig
             let key = *key;
             self.deadlines.pop_first();
             let pending_read = self.reads.remove(&key).expect("a deadline entry must have its read");
+            self.free_emptied();
             let err = make_error(key.min_quorum_acked_at);
             pending_read.response_tx.send(Err(err)).ok();
         }
@@ -82,6 +101,7 @@ where C: RaftTypeConfig
                 sequence,
             };
             self.deadlines.remove(&deadline_key).expect("a read must have its deadline entry");
+            self.free_emptied();
 
             let linearizer = pending_read.linearizer.with_applied(applied.clone());
             pending_read.response_tx.send(Ok(linearizer)).ok();
@@ -90,10 +110,33 @@ where C: RaftTypeConfig
     }
 
     pub(crate) fn drain_all_with_error(&mut self, err: LinearizableReadError<C>) {
+        self.drain_all(|response_tx| {
+            response_tx.send(Err(err.clone())).ok();
+        });
+    }
+
+    /// Takes every read out, each one's channel to `answer`, and frees both maps' nodes before any
+    /// read's charge goes back.
+    fn drain_all(&mut self, mut answer: impl FnMut(ClientReadTx<C>)) {
         self.deadlines.clear();
-        let pending_reads = std::mem::take(&mut self.reads);
-        for pending_read in pending_reads.into_values() {
-            pending_read.response_tx.send(Err(err.clone())).ok();
+        let mut charges = None;
+        for pending_read in std::mem::take(&mut self.reads).into_values() {
+            funding::merge(&mut charges, pending_read.funding);
+            answer(pending_read.response_tx);
+        }
+        // The map's last nodes are freed as its iterator ends, before this.
+        drop(charges);
+    }
+
+    /// Replaces a map emptied by a removal, so the root it keeps is freed while the removed
+    /// read's charge is still held: a map of one entry or more holds no more nodes than the
+    /// charges of its reads cover.
+    fn free_emptied(&mut self) {
+        if self.reads.is_empty() {
+            self.reads = BTreeMap::new();
+        }
+        if self.deadlines.is_empty() {
+            self.deadlines = BTreeMap::new();
         }
     }
 
@@ -115,5 +158,15 @@ where C: RaftTypeConfig
     pub(super) fn is_empty(&self) -> bool {
         self.debug_assert_indexes_agree();
         self.reads.is_empty()
+    }
+}
+
+impl<C> Drop for PendingReadQueue<C>
+where C: RaftTypeConfig
+{
+    /// The reads left unanswered are dropped with their channels, the maps' nodes freed before
+    /// any read's charge goes back.
+    fn drop(&mut self) {
+        self.drain_all(drop);
     }
 }
