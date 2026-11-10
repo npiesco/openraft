@@ -92,6 +92,10 @@ where C: RaftTypeConfig
 
     Initialize {
         members: BTreeMap<C::NodeId, C::Node>,
+
+        /// The payload the initial membership is bound into.
+        payload: C::Payload,
+
         tx: ResultSender<C, (), InitializeError<C>>,
     },
 
@@ -119,7 +123,7 @@ where C: RaftTypeConfig
     /// reads back the membership the caller already bound into `payload`, validates that exact
     /// value, and appends `payload` unchanged.
     AppendMembership {
-        /// The caller's payload, after [`RaftPayload::with_membership()`] bound the proposed
+        /// The caller's payload, after [`RaftPayload::bind_membership()`] bound the proposed
         /// membership into it.
         ///
         /// This payload is the single source of truth for the entry: `RaftCore` reads the
@@ -127,7 +131,7 @@ where C: RaftTypeConfig
         /// membership in a second field would let the validated value and the written value drift
         /// apart.
         ///
-        /// [`RaftPayload::with_membership()`]: crate::entry::RaftPayload::with_membership
+        /// [`RaftPayload::bind_membership()`]: crate::entry::RaftPayload::bind_membership
         payload: C::Payload,
 
         preconditions: BatchOf<C, Precondition<C>>,

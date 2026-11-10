@@ -13,6 +13,7 @@ use crate::engine::LogIdList;
 use crate::engine::testing::UTConfig;
 use crate::engine::testing::log_id;
 use crate::entry::RaftEntry;
+use crate::entry::RaftPayload;
 use crate::errors::InitializeError;
 use crate::errors::NotAllowed;
 use crate::errors::NotInMembers;
@@ -43,7 +44,7 @@ fn test_initialize_single_node() -> anyhow::Result<()> {
         // The first log id uses the node's own id as leader
         let log_id0 = log_id(0, 1, 0);
 
-        eng.initialize(m1())?;
+        eng.initialize(m1(), RaftPayload::blank())?;
 
         assert_eq!(Some(log_id0), eng.state.get_log_id(0));
         assert_eq!(None, eng.state.get_log_id(1));
@@ -87,7 +88,7 @@ fn test_initialize() -> anyhow::Result<()> {
         // The first log id uses the node's own id as leader
         let log_id0 = log_id(0, 1, 0);
 
-        eng.initialize(m12())?;
+        eng.initialize(m12(), RaftPayload::blank())?;
 
         assert_eq!(Some(log_id0), eng.state.get_log_id(0));
         assert_eq!(None, eng.state.get_log_id(1));
@@ -121,7 +122,7 @@ fn test_initialize() -> anyhow::Result<()> {
                 last_log_id: Some(existing_log_id),
                 vote: Vote::new(0, 0),
             })),
-            eng.initialize(m12())
+            eng.initialize(m12(), RaftPayload::blank())
         );
     }
 
@@ -135,7 +136,7 @@ fn test_initialize() -> anyhow::Result<()> {
                 last_log_id: None,
                 vote: Vote::new(1, 1),
             })),
-            eng.initialize(m12())
+            eng.initialize(m12(), RaftPayload::blank())
         );
     }
 
@@ -148,7 +149,7 @@ fn test_initialize() -> anyhow::Result<()> {
                 node_id: 0,
                 membership: m12()
             })),
-            eng.initialize(m12())
+            eng.initialize(m12(), RaftPayload::blank())
         );
     }
 

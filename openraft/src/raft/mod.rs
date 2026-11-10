@@ -1504,6 +1504,26 @@ where
         self.management_api().initialize(members).await.into_raft_result()
     }
 
+    /// [`Raft::initialize`], its initial membership bound into `payload` with
+    /// [`RaftPayload::bind_membership()`] rather than into a blank payload.
+    ///
+    /// A refusal to bind it is answered with [`InitializeError::MembershipRefused`], and the node
+    /// stays pristine.
+    ///
+    /// [`RaftPayload::bind_membership()`]: crate::entry::RaftPayload::bind_membership
+    #[since(version = "0.10.0")]
+    #[tracing::instrument(level = "debug", skip(self, payload))]
+    pub async fn initialize_with_payload<T>(
+        &self,
+        members: T,
+        payload: C::Payload,
+    ) -> Result<(), RaftError<C, InitializeError<C>>>
+    where
+        T: IntoNodes<C::NodeId, C::Node> + Debug,
+    {
+        self.management_api().initialize_with_payload(members, payload).await.into_raft_result()
+    }
+
     /// Provides read-only access to [`RaftState`] through a user-provided function.
     ///
     /// The function `func` is applied to the current [`RaftState`]. The result of this function,

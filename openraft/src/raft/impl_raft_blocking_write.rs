@@ -89,8 +89,10 @@ where
     ///
     /// A request without an application-defined payload starts each physical log entry from a
     /// separate `C::Payload::blank()`. [`ChangeMembershipRequest::with_payload()`] supplies
-    /// separate application-defined bases instead. OpenRaft calls `with_membership()` on each
-    /// base payload with the membership computed for that physical log entry.
+    /// separate application-defined bases instead. OpenRaft calls `bind_membership()` on each
+    /// base payload with the membership computed for that physical log entry. A payload that
+    /// refuses it fails the change with [`ChangeMembershipError::MembershipRefused`], and that
+    /// entry is not written.
     ///
     /// Request preconditions follow the same two-step rules as [`Self::change_membership_if()`].
     /// They guard the first proposal. OpenRaft updates the membership-log precondition for a
@@ -100,7 +102,7 @@ where
     /// binds each payload to the shape of the membership it carries: the joint payload to the
     /// joint entry, the uniform payload to the uniform entry. A change that moves no voter needs
     /// no joint entry, so it drops the joint payload and writes its single entry with the uniform
-    /// payload. If `with_membership()` preserves application data, the state machine applies each
+    /// payload. If `bind_membership()` preserves application data, the state machine applies each
     /// payload at its corresponding log ID.
     ///
     /// Both supplied payloads are serialized, stored, and replicated when the change requires two
@@ -111,6 +113,8 @@ where
     ///
     /// The returned [`ChangeMembershipOutcome`] always contains the uniform response, and the
     /// joint response when the change entered joint consensus.
+    ///
+    /// [`ChangeMembershipError::MembershipRefused`]: crate::errors::ChangeMembershipError::MembershipRefused
     #[since(
         version = "0.10.0",
         change = "accept a request with an optional payload and preconditions"
@@ -176,12 +180,14 @@ where
     /// committed and applied.
     ///
     /// `payload` is the base entry payload. This method calls
-    /// [`RaftPayload::with_membership()`] on it, and that implementation decides how much of the
+    /// [`RaftPayload::bind_membership()`] on it, and that implementation decides how much of the
     /// base survives: if it preserves application data, the data and the membership are stored
-    /// and applied at one log id. The default `EntryPayload::with_membership()` returns
-    /// `EntryPayload::Membership`, so it replaces an `EntryPayload::Normal(data)` base and the
-    /// state machine never receives `data`. A caller with no application data passes
-    /// `C::Payload::blank()`.
+    /// and applied at one log id. A refusal fails the call with
+    /// [`ChangeMembershipError::MembershipRefused`] and writes nothing. The default
+    /// `bind_membership()` delegates to `with_membership()`, and
+    /// `EntryPayload::with_membership()` returns `EntryPayload::Membership`, so it replaces an
+    /// `EntryPayload::Normal(data)` base and the state machine never receives `data`. A caller
+    /// with no application data passes `C::Payload::blank()`.
     ///
     /// # Accepted transitions
     ///
@@ -249,7 +255,8 @@ where
     /// .await?;
     /// ```
     ///
-    /// [`RaftPayload::with_membership()`]: crate::entry::RaftPayload::with_membership
+    /// [`RaftPayload::bind_membership()`]: crate::entry::RaftPayload::bind_membership
+    /// [`ChangeMembershipError::MembershipRefused`]: crate::errors::ChangeMembershipError::MembershipRefused
     /// [`UnsupportedMembershipTransition`]: crate::errors::UnsupportedMembershipTransition
     /// [`InProgress`]: crate::errors::InProgress
     /// [`UncommittedLeaderLog`]: crate::errors::UncommittedLeaderLog

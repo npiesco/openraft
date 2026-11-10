@@ -7,6 +7,7 @@ use openraft_macros::since;
 
 use crate::Membership;
 use crate::log_id::LogId;
+use crate::membership::membership::arc_block_bytes;
 use crate::node::Node;
 use crate::node::NodeId;
 use crate::quorum::QuorumSet;
@@ -70,6 +71,29 @@ where
     pub(crate) fn new_arc(log_id: Option<LogId<CLID>>, membership: Membership<NID, N>) -> Arc<Self> {
         Arc::new(Self::new(log_id, membership))
     }
+
+    /// The bytes of the `Arc` blocks OpenRaft allocates around one owned membership
+    /// ([`Membership::with_owner`]) while it holds a clone of it, which that membership's owner
+    /// accounts for besides [`Membership::OWNED_BLOCK_BYTES`].
+    ///
+    /// Each block holds a clone that shares the owner, so it is freed just after the owner is
+    /// released, when its last clone drops. At most this many are held at once for one owner:
+    ///
+    /// - Two `Arc<StoredMembership>`: the membership state's committed and effective membership.
+    ///   The effective one is built by `FollowingHandler::append_membership` from an entry,
+    ///   `FollowingHandler::membership_install_snapshot`, `ReplicationHandler::append_membership`
+    ///   (`StoredMembership::new_arc`) or `StorageHelper::get_membership`, which wraps one
+    ///   membership twice when no log entry holds a later one. Committing shares the effective
+    ///   block.
+    /// - Five `Arc<Membership>` quorum sets: one each for a pre-candidate and a candidate
+    ///   (`Engine::new_pre_candidate` and `Engine::new_candidate`), two for a leader's progress
+    ///   and clock progress (`ReplicationHandler::rebuild_progresses`, or one both share, built
+    ///   by `RaftState::new_leader` or inherited from the candidate), and one more for the
+    ///   block any of these replaces, which is freed only after its replacement is built.
+    ///
+    /// The membership state's default blocks and the metrics' blocks are either empty, holding
+    /// no owner, or clones of the blocks above, which allocate nothing.
+    pub const OWNED_ARC_BYTES: usize = 2 * arc_block_bytes::<Self>() + 5 * arc_block_bytes::<Membership<NID, N>>();
 
     /// Get the log ID at which this membership was stored.
     pub fn log_id(&self) -> &Option<LogId<CLID>> {

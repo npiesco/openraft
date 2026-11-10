@@ -11,6 +11,7 @@ pub(crate) mod into_raft_result;
 mod leader_changed;
 mod linearizable_read_error;
 mod membership_error;
+mod membership_refused;
 mod node_metadata_changed;
 mod node_not_found;
 mod operation;
@@ -41,6 +42,7 @@ pub(crate) use self::higher_vote::HigherVote;
 pub use self::leader_changed::LeaderChanged;
 pub use self::linearizable_read_error::LinearizableReadError;
 pub use self::membership_error::MembershipError;
+pub use self::membership_refused::MembershipRefused;
 pub use self::node_metadata_changed::NodeMetadataChanged;
 pub use self::node_not_found::NodeNotFound;
 pub use self::operation::Operation;
@@ -180,6 +182,11 @@ where
     #[since(version = "0.10.0")]
     #[error(transparent)]
     NodeMetadataChanged(#[from] NodeMetadataChanged<NID>),
+
+    /// The payload refused to bind the membership the change computed.
+    #[since(version = "0.10.0")]
+    #[error(transparent)]
+    MembershipRefused(#[from] MembershipRefused),
 }
 
 /// The set of errors which may take place when initializing a pristine Raft node.
@@ -195,6 +202,11 @@ where C: RaftTypeConfig
     /// This node is not included in the initial membership configuration.
     #[error(transparent)]
     NotInMembers(#[from] NotInMembers<C>),
+
+    /// The payload refused to bind the initial membership.
+    #[since(version = "0.10.0")]
+    #[error(transparent)]
+    MembershipRefused(#[from] MembershipRefused),
 }
 
 /// Error occurs when invoking a remote raft API.

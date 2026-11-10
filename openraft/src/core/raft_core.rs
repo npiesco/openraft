@@ -183,7 +183,7 @@ where
     C: RaftTypeConfig,
 {
     let membership = membership_state.next_membership(changes, retain)?;
-    let payload = payloads.select(membership);
+    let payload = payloads.select(membership)?;
     Ok(payload)
 }
 
@@ -509,11 +509,11 @@ where
     /// Append a caller-built membership as one log entry, with no intermediate joint membership.
     ///
     /// `payload` already carries the proposed membership, bound by
-    /// [`RaftPayload::with_membership()`]. That payload is the only source of truth here: the
+    /// [`RaftPayload::bind_membership()`]. That payload is the only source of truth here: the
     /// membership this method validates is read back out of it, and the entry written to the log
     /// is that same payload.
     ///
-    /// [`RaftPayload::with_membership()`]: crate::entry::RaftPayload::with_membership
+    /// [`RaftPayload::bind_membership()`]: crate::entry::RaftPayload::bind_membership
     #[tracing::instrument(level = "debug", skip(self, payload, tx, preconditions))]
     pub(super) fn append_membership(
         &mut self,
@@ -546,7 +546,7 @@ where
         }
 
         // Safe unwrap(): the caller bound `membership` into this payload with
-        // `RaftPayload::with_membership()`, whose contract is that `get_membership()` returns it.
+        // `RaftPayload::bind_membership()`, whose contract is that `get_membership()` returns it.
         let membership = payload.get_membership().unwrap();
 
         let membership_state = &self.engine.state.membership_state;
@@ -885,13 +885,14 @@ where
     pub(crate) fn handle_initialize(
         &mut self,
         member_nodes: BTreeMap<C::NodeId, C::Node>,
+        payload: C::Payload,
         tx: ResultSender<C, (), InitializeError<C>>,
     ) {
         tracing::debug!("{}: member_nodes: {:?}", func_name!(), member_nodes);
 
         let membership = Membership::from(member_nodes);
 
-        let res = self.engine.initialize(membership);
+        let res = self.engine.initialize(membership, payload);
 
         let has_error = res.is_err();
 
@@ -1788,10 +1789,10 @@ where
                     proposed_at,
                 );
             }
-            RaftMsg::Initialize { members, tx } => {
+            RaftMsg::Initialize { members, payload, tx } => {
                 tracing::info!("received RaftMsg::Initialize: {}, members: {:?}", func_name!(), members);
 
-                self.handle_initialize(members, tx);
+                self.handle_initialize(members, payload, tx);
             }
             RaftMsg::ChangeMembership {
                 changes,

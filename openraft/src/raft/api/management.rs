@@ -50,9 +50,23 @@ where C: RaftTypeConfig
     #[tracing::instrument(level = "debug", skip(self))]
     pub(crate) async fn initialize<T>(&self, members: T) -> Result<Result<(), InitializeError<C>>, Fatal<C>>
     where T: IntoNodes<C::NodeId, C::Node> + Debug {
+        self.initialize_with_payload(members, C::Payload::blank()).await
+    }
+
+    #[since(version = "0.10.0")]
+    #[tracing::instrument(level = "debug", skip(self, payload))]
+    pub(crate) async fn initialize_with_payload<T>(
+        &self,
+        members: T,
+        payload: C::Payload,
+    ) -> Result<Result<(), InitializeError<C>>, Fatal<C>>
+    where
+        T: IntoNodes<C::NodeId, C::Node> + Debug,
+    {
         self.inner
             .call_core_oneshot(|tx| RaftMsg::Initialize {
                 members: members.into_nodes(),
+                payload,
                 tx,
             })
             .await
@@ -213,7 +227,10 @@ where C: RaftTypeConfig
 
         // Bind the membership into the payload here, so the core has exactly one value to
         // validate and to write: the payload it receives.
-        let payload = payload.with_membership(membership);
+        let payload = match payload.bind_membership(membership) {
+            Ok(payload) => payload,
+            Err(refused) => return Ok(Err(ClientWriteError::ChangeMembershipError(refused.into()))),
+        };
 
         let (tx, rx) = ProgressResponder::<C, _>::complete_only();
 

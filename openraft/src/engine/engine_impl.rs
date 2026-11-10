@@ -232,10 +232,17 @@ where
     ///
     /// [precondition]: crate::docs::cluster_control::cluster_formation#preconditions-for-initialization
     #[tracing::instrument(level = "debug", skip_all)]
-    pub(crate) fn initialize(&mut self, membership: Membership<C::NodeId, C::Node>) -> Result<(), InitializeError<C>> {
+    pub(crate) fn initialize(
+        &mut self,
+        membership: Membership<C::NodeId, C::Node>,
+        payload: C::Payload,
+    ) -> Result<(), InitializeError<C>> {
         self.check_initialize()?;
 
         self.check_members_contain_me(&membership)?;
+
+        // Bound before any state changes, so a refusal leaves the node pristine.
+        let payload = payload.bind_membership(membership)?;
 
         // FollowingHandler requires vote to be committed.
         let leader_id = LeaderIdOf::<C>::new(TermOf::<C>::default(), self.config.id.clone());
@@ -244,7 +251,6 @@ where
 
         // The very first log id
         let log_id = LogIdOf::<C>::new(leader_id.to_committed(), 0);
-        let payload = C::Payload::membership(membership);
         let entry = C::Entry::new(log_id, payload);
         self.following_handler().do_append_entries(vec![entry]);
 

@@ -18,6 +18,19 @@ use crate::node::NodeId;
 use crate::quorum::QuorumBridge;
 use crate::quorum::QuorumIntersection;
 
+/// The bytes an `Arc<T>` allocates for its block: its strong and weak counts, then the value,
+/// padded to the block's alignment.
+pub(crate) const fn arc_block_bytes<T>() -> usize {
+    let value = align_of::<T>();
+    let align = if value > align_of::<usize>() {
+        value
+    } else {
+        align_of::<usize>()
+    };
+    let offset = (2 * size_of::<usize>()).next_multiple_of(value);
+    (offset + size_of::<T>()).next_multiple_of(align)
+}
+
 /// The membership configuration of the cluster.
 ///
 /// It could be a joint of one, two or more configs, i.e., a quorum is a node set that is superset
@@ -301,7 +314,10 @@ where
     /// and `owner` is released at once.
     ///
     /// The owner accounts for the members' memory, the block they move into
-    /// ([`Self::OWNED_BLOCK_BYTES`]) and its own box.
+    /// ([`Self::OWNED_BLOCK_BYTES`]), its own box, and the `Arc` blocks OpenRaft wraps clones of
+    /// it in ([`StoredMembership::OWNED_ARC_BYTES`]).
+    ///
+    /// [`StoredMembership::OWNED_ARC_BYTES`]: crate::StoredMembership::OWNED_ARC_BYTES
     pub fn with_owner(self, owner: Box<dyn MembershipOwner>) -> Self {
         match self.repr {
             Repr::Plain(members) => Membership {
@@ -333,16 +349,7 @@ where
     /// The bytes [`Self::with_owner`] allocates for the block an owned membership's members and
     /// owner share: an `Arc`'s strong and weak counts, then the members and the owner's box,
     /// padded to the block's alignment.
-    pub const OWNED_BLOCK_BYTES: usize = {
-        let value = align_of::<OwnedMembers<NID, N>>();
-        let align = if value > align_of::<usize>() {
-            value
-        } else {
-            align_of::<usize>()
-        };
-        let offset = (2 * size_of::<usize>()).next_multiple_of(value);
-        (offset + size_of::<OwnedMembers<NID, N>>()).next_multiple_of(align)
-    };
+    pub const OWNED_BLOCK_BYTES: usize = arc_block_bytes::<OwnedMembers<NID, N>>();
 
     /// Returns true if this membership is in joint consensus, i.e. it has more than one config.
     pub(crate) fn is_joint(&self) -> bool {

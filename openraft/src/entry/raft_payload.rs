@@ -6,6 +6,7 @@ use openraft_macros::since;
 use crate::AppData;
 use crate::Membership;
 use crate::base::OptionalFeatures;
+use crate::errors::MembershipRefused;
 use crate::node::Node;
 use crate::node::NodeId;
 
@@ -50,6 +51,17 @@ where Self: OptionalFeatures + Debug + Display + Sized + 'static
     /// may preserve other application fields.
     #[since(version = "0.10.0")]
     fn with_membership(self, membership: Membership<Self::NodeId, Self::Node>) -> Self;
+
+    /// Bind a membership OpenRaft proposes into this payload, or refuse it.
+    ///
+    /// OpenRaft binds every membership it proposes through this method: the one a membership
+    /// change computes, the one a direct membership append is given and the one initialization
+    /// builds. A refusal answers that call with [`MembershipRefused`], and no entry is written.
+    /// The default binds it with [`with_membership()`](Self::with_membership) and never refuses.
+    #[since(version = "0.10.0")]
+    fn bind_membership(self, membership: Membership<Self::NodeId, Self::Node>) -> Result<Self, MembershipRefused> {
+        Ok(self.with_membership(membership))
+    }
 
     /// Return `Some(Membership)` if the entry payload contains a membership payload.
     #[since(version = "0.10.0", change = "use associated node types")]
