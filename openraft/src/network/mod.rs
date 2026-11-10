@@ -41,6 +41,7 @@ pub use append_trait::NetAppend;
 pub use backoff::Backoff;
 pub use backoff_trait::NetBackoff;
 pub use factory::RaftNetworkFactory;
+pub(crate) use factory::clients_bytes;
 #[allow(deprecated)]
 pub use raft_network_v1::RaftNetwork;
 pub use rpc_option::RPCOption;

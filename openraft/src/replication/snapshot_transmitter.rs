@@ -19,6 +19,7 @@ use crate::network::NetBackoff;
 use crate::network::NetSnapshot;
 use crate::network::RPCOption;
 use crate::progress::inflight_id::InflightId;
+use crate::proposer::funding::sleep_bytes;
 use crate::proposer::funding::task_bytes;
 use crate::replication::EXHAUSTED_BACKOFF_DELAY;
 use crate::replication::replication_context::ReplicationContext;
@@ -32,10 +33,12 @@ use crate::vote::raft_vote::RaftVoteExt;
 
 /// The bytes a Leader charges for each snapshot transmitter it runs to another member, sending
 /// through clients of `NF` the snapshots of `SM`, before any of it is made: its task, everything
-/// the runtime allocates for it, and the channel that stops it, each held until it is freed. The
-/// client is not among them: it funds its own allocations. A Leader runs at most one transmitter
-/// per other member, but a replaced one's task may still run until it sees it is stopped: a node
-/// run with a funder holds two transmitters charged at once per other member.
+/// the runtime allocates for it, the channel that stops it and the one sleep at a time it waits
+/// out its backoff on, each held until it is freed. Not among them is what its client allocates,
+/// which the factory tells per target ([`RaftNetworkFactory::new_client_bytes`]) and is charged
+/// with them. A Leader runs at most one transmitter per other member, but a replaced one's task
+/// may still run until it sees it is stopped: a node run with a funder holds two transmitters
+/// charged at once per other member.
 ///
 /// `None` if the runtime cannot fund its tasks or channels now, as
 /// [`AsyncRuntime::spawn_bytes`](crate::async_runtime::AsyncRuntime::spawn_bytes) tells: a funded
@@ -49,7 +52,13 @@ where
     SM: RaftStateMachine<C>,
 {
     task_bytes::<C, _, _>(SnapshotTransmitter::<C, NF, SM>::stream_snapshot)?
-        .checked_add(WatchOf::<C>::block_bytes::<()>()?)
+        .checked_add(snapshot_transmitter_parts_bytes::<C>()?)
+}
+
+/// What a snapshot transmitter holds besides its task: the block of the channel that stops it,
+/// and the one sleep at a time it waits out its backoff on.
+pub(crate) fn snapshot_transmitter_parts_bytes<C: RaftTypeConfig>() -> Option<usize> {
+    WatchOf::<C>::block_bytes::<()>()?.checked_add(sleep_bytes::<C>()?)
 }
 
 /// The number of `Network` errors that [`SnapshotTransmitter`] retries immediately. The next one

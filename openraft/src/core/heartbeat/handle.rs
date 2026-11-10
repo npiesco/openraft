@@ -68,7 +68,8 @@ pub const fn heartbeat_map_bytes<C: RaftTypeConfig>(members: usize) -> usize {
 /// The bytes a Leader charges for each heartbeat worker it runs for another member, sending
 /// through clients of `NF`, before any of the worker is made: its task, everything the runtime
 /// allocates for it, and the channels that stop it and send it heartbeats, each held until it is
-/// freed. The client is not among them: it funds its own allocations. A node run with a funder
+/// freed. Not among them is what its client allocates, which the factory tells per target
+/// ([`RaftNetworkFactory::new_client_bytes`]) and is charged with them. A node run with a funder
 /// holds two workers charged at once per other member while it rebuilds its workers, as a
 /// replaced worker's task may still run until it sees it is stopped.
 ///
@@ -228,12 +229,13 @@ where C: RaftTypeConfig
 
     /// Spawns a worker for each of `progresses` that has none, or each if `close_old`, every part
     /// of a worker charged to `spawning`'s funding before any of it is made: its task, the channels
-    /// that stop it and send it heartbeats, and the network client it sends them with, which
-    /// funds its own copy of the target. A worker refused its charge is not made; the map
-    /// holding the workers is charged before it is built, refused, no worker is spawned, and
-    /// the old ones are kept unless `close_old`. Returns whether every target has its worker:
-    /// if not, the caller keeps `progresses` with [`keep_unspawned`](Self::keep_unspawned), so
-    /// those left without are spawned again before the next heartbeat is sent.
+    /// that stop it and send it heartbeats, and what the network client it sends them with
+    /// allocates ([`RaftNetworkFactory::new_client_bytes`]). A worker refused its charge is not
+    /// made; the map holding the workers is charged before it is built, refused, no worker is
+    /// spawned, and the old ones are kept unless `close_old`. Returns whether every target has
+    /// its worker: if not, the caller keeps `progresses` with
+    /// [`keep_unspawned`](Self::keep_unspawned), so those left without are spawned again before
+    /// the next heartbeat is sent.
     pub(crate) async fn spawn_workers<NF>(
         &mut self,
         spawning: Spawning<'_, C>,
@@ -316,7 +318,9 @@ where C: RaftTypeConfig
     where
         NF: RaftNetworkFactory<C>,
     {
-        let mut task = match TaskCharge::<C, _>::take(spawning.funding, worker_parts_bytes::<C>) {
+        let factory = &*network_factory;
+        let parts = || worker_parts_bytes::<C>()?.checked_add(factory.new_client_bytes(&prog.target, node)?);
+        let mut task = match TaskCharge::<C, _>::take(spawning.funding, parts) {
             Ok(task) => task,
             Err(Unfunded) => {
                 tracing::warn!("id={} target={}: no HeartbeatWorker: it is unfunded", id, prog.target);
@@ -384,6 +388,7 @@ mod tests {
     use crate::errors::StreamingError;
     use crate::impls::Vote;
     use crate::network::RPCOption;
+    use crate::network::clients_bytes;
     use crate::progress::entry::ProgressEntry;
     use crate::progress::stream_id::StreamId;
     use crate::proposer::SendStamp;
@@ -456,6 +461,33 @@ mod tests {
         async fn new_client(&mut self, _target: u64, _node: &()) -> Follower {
             Follower
         }
+    }
+
+    /// A factory telling what its clients allocate, by target.
+    struct Telling;
+
+    impl RaftNetworkFactory<C> for Telling {
+        type Network = Follower;
+
+        async fn new_client(&mut self, _target: u64, _node: &()) -> Follower {
+            Follower
+        }
+
+        fn new_client_bytes(&self, target: &u64, _node: &()) -> Option<usize> {
+            Some(*target as usize * 8)
+        }
+    }
+
+    /// Clients to several targets are charged what each allocates, as the factory tells; one that
+    /// cannot tell what its clients allocate, as by default, has none of them charged, so none
+    /// made, on a funded node.
+    #[test]
+    fn test_clients_are_charged_what_the_factory_tells() {
+        let targets = [(2, ()), (3, ())];
+        let targets = || targets.iter().map(|(target, node)| (target, node));
+        assert_eq!(Some(40), clients_bytes::<C, _, _>(&Telling, targets()));
+        assert_eq!(Some(0), clients_bytes::<C, _, _>(&Telling, std::iter::empty()));
+        assert_eq!(None, clients_bytes::<C, _, _>(&Followers, targets()));
     }
 
     /// A target whose heartbeat worker is refused its charge has no worker, and is kept to be

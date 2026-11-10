@@ -98,6 +98,7 @@ use crate::network::NetVote;
 use crate::network::RPCOption;
 use crate::network::RPCTypes;
 use crate::network::RaftNetworkFactory;
+use crate::network::clients_bytes;
 use crate::progress::VecProgressEntry;
 use crate::progress::inflight_id::InflightId;
 use crate::progress::stream_id::StreamId;
@@ -105,10 +106,10 @@ use crate::proposer::Leader;
 use crate::proposer::LeaderQuorumSet;
 use crate::proposer::SendStamp;
 use crate::proposer::funding::Elapsed;
+use crate::proposer::funding::Funding;
 use crate::proposer::funding::Prepaid;
 use crate::proposer::funding::Shared;
 use crate::proposer::funding::TaskCharge;
-use crate::proposer::funding::sleep_bytes;
 use crate::proposer::funding::within;
 use crate::raft::AppendEntriesRequest;
 use crate::raft::ClientWriteResult;
@@ -133,6 +134,7 @@ use crate::replication::replication_handle::ReplicationHandle;
 use crate::replication::replication_handle::replication_map_bytes;
 use crate::replication::replication_progress;
 use crate::replication::snapshot_transmitter::SnapshotTransmitter;
+use crate::replication::snapshot_transmitter::snapshot_transmitter_parts_bytes;
 use crate::replication::snapshot_transmitter_handle::SnapshotTransmitterHandle;
 use crate::replication::stream_parts_bytes;
 use crate::runtime::RaftRuntime;
@@ -152,7 +154,6 @@ use crate::type_config::alias::MpscSenderOf;
 use crate::type_config::alias::OneshotReceiverOf;
 use crate::type_config::alias::PayloadOf;
 use crate::type_config::alias::VoteOf;
-use crate::type_config::alias::WatchOf;
 use crate::type_config::alias::WatchReceiverOf;
 use crate::type_config::async_runtime::mpsc::MpscSender;
 use crate::vote::RaftLeaderId;
@@ -1206,9 +1207,9 @@ where
     /// A replication stream to `target` for `leader_vote`, the stream `stream_id` of its
     /// progress, replicating from `matching`, every part of it charged before any is made, as
     /// [`replication_stream_bytes`](crate::replication_stream_bytes) sizes it: its task, the
-    /// channels it holds and the state its task holds, and the network client it replicates with,
-    /// which funds its own copy of the target. None, nothing made, if the charge is refused or
-    /// `target` is no member of the effective membership.
+    /// channels it holds and the state its task holds, and what the network client it replicates
+    /// with allocates ([`RaftNetworkFactory::new_client_bytes`]), held with its task. None, nothing
+    /// made, if the charge is refused or `target` is no member of the effective membership.
     #[tracing::instrument(level = "debug", skip_all)]
     pub(crate) async fn spawn_replication_stream(
         &mut self,
@@ -1226,7 +1227,9 @@ where
             return None;
         };
 
-        let mut task = match TaskCharge::<C, _>::take(&self.engine.config.funding, stream_parts_bytes::<C, NF, LS>) {
+        let factory = &self.network_factory;
+        let parts = || stream_parts_bytes::<C, NF, LS>()?.checked_add(factory.new_client_bytes(target, node)?);
+        let mut task = match TaskCharge::<C, _>::take(&self.engine.config.funding, parts) {
             Ok(task) => task,
             Err(Unfunded) => {
                 tracing::warn!(
@@ -1791,46 +1794,79 @@ where
     /// outcome; `ttl` is the timeout the caller is expected to enforce inside that future, by
     /// [`within`], on the one sleep each task is charged.
     ///
-    /// On a funded node every task, and the sleep it holds, is charged before any of them is made:
-    /// refused, no request is sent, nothing allocated for any. The voters are read where the
-    /// membership holds them, not collected.
+    /// On a funded node every task, the sleep it holds and what its client allocates
+    /// ([`RaftNetworkFactory::new_client_bytes`]) are charged before any of them is made: refused,
+    /// no request is sent, nothing allocated for any. The voters are read where the membership
+    /// holds them, not collected.
     async fn broadcast_to_voters<F, Fut>(&mut self, ttl: Duration, make_rpc: F)
     where
         F: Fn(C::NodeId, NF::Network, RPCOption) -> Fut,
         Fut: Future<Output = ()> + OptionalSend + 'static,
     {
-        let membership = self.engine.state.membership_state.effective().membership();
-        let others = membership.voters().filter(|(id, _)| **id != self.id).count();
+        // The fields used, borrowed apart: the membership is read from the engine while the
+        // factory makes clients, across its awaits.
+        let Self {
+            id,
+            engine,
+            network_factory,
+            ..
+        } = self;
+        let id: &C::NodeId = id;
+        let funding: &Funding = &engine.config.funding;
+        let membership: &Membership<C::NodeId, C::Node> = engine.state.membership_state.effective().membership();
 
-        let charge = match self.engine.config.funding.sleeping_tasks::<C, Fut>(others) {
+        let charge = match Self::charge_broadcast::<Fut>(funding, network_factory, id, membership) {
             Ok(charge) => charge,
             Err(Unfunded) => {
-                tracing::warn!("id={}: no broadcast to {} voters: it is unfunded", self.id, others);
+                tracing::warn!("id={}: no broadcast to the voters: it is unfunded", id);
                 return;
             }
         };
         let mut prepaid = Prepaid::<C>::new(charge, std::convert::identity);
 
         for (target, node) in membership.voters() {
-            if *target == self.id {
+            if target == id {
                 continue;
             }
+            // As charged for it; only a node without a funder, which charged nothing, is not told.
+            let client_bytes = network_factory.new_client_bytes(target, node).unwrap_or(0);
 
-            let client = self.network_factory.new_client(target.clone(), node).await;
+            let client = network_factory.new_client(target.clone(), node).await;
 
             let fut = make_rpc(target.clone(), client, RPCOption::new(ttl));
 
-            // From its share of the charge taken for all of them: refused only if the runtime
-            // cannot make the task.
-            let spawned = prepaid.sleeping(0).and_then(|held| prepaid.spawn(fut, held));
+            // From its share of the charge taken for all of them, held by the task with the client
+            // its future holds: refused only if the runtime cannot make the task.
+            let spawned = prepaid.sleeping(client_bytes).and_then(|held| prepaid.spawn(fut, held));
             if let Err(Unfunded) = spawned {
                 tracing::warn!(
                     "id={} target={}: no broadcast request: its task is unfunded",
-                    self.id,
+                    id,
                     target
                 );
             }
         }
+    }
+
+    /// What a broadcast of `Fut`s to the voters of `membership` other than `id` is charged before
+    /// any is made, in one charge: each task, the sleep it holds, and what its client allocates.
+    /// Refused, nothing charged, if the funder refuses it or the factory cannot tell what a client
+    /// allocates; `None` on a node without a funder.
+    fn charge_broadcast<Fut>(
+        funding: &Funding,
+        network_factory: &NF,
+        id: &C::NodeId,
+        membership: &Membership<C::NodeId, C::Node>,
+    ) -> Result<Option<Charge>, Unfunded>
+    where
+        Fut: Future<Output = ()> + OptionalSend + 'static,
+    {
+        if !funding.is_funded() {
+            return Ok(None);
+        }
+        let others = || membership.voters().filter(move |(target, _)| *target != id);
+        let clients = clients_bytes::<C, NF, _>(network_factory, others()).ok_or(Unfunded)?;
+        funding.sleeping_tasks::<C, Fut>(others().count(), clients)
     }
 
     #[tracing::instrument(level = "debug", skip_all)]
@@ -2686,9 +2722,9 @@ where
     /// Run [`Command::ReplicateSnapshot`]: a snapshot transmitter to `target`, every part of it
     /// charged before any is made, as
     /// [`snapshot_transmitter_bytes`](crate::snapshot_transmitter_bytes) sizes it: its task, the
-    /// channel that stops it, and the network client it sends with, which funds its own copy of
-    /// the target. Refused its charge, or its replication stream, nothing is made, and the
-    /// snapshot inflight is reset to be sent again.
+    /// channel that stops it and the sleep it backs off on, and what the network client it sends
+    /// with allocates ([`RaftNetworkFactory::new_client_bytes`]). Refused its charge, or its
+    /// replication stream, nothing is made, and the snapshot inflight is reset to be sent again.
     async fn run_replicate_snapshot(
         &mut self,
         leader_vote: CommittedVoteOf<C>,
@@ -2700,8 +2736,16 @@ where
             return;
         };
 
-        // The channel that cancels it, and the one sleep at a time it waits out its backoff on.
-        let parts = || WatchOf::<C>::block_bytes::<()>()?.checked_add(sleep_bytes::<C>()?);
+        // A target no longer a member is sent nothing.
+        let Some(node) = self.engine.state.membership_state.effective().get_node(&target) else {
+            self.reset_inflight(target, inflight_id);
+            return;
+        };
+
+        // The channel that cancels it, the one sleep at a time it waits out its backoff on, and
+        // what the client it sends with allocates.
+        let factory = &self.network_factory;
+        let parts = || snapshot_transmitter_parts_bytes::<C>()?.checked_add(factory.new_client_bytes(&target, node)?);
         let mut task = match TaskCharge::<C, _>::take(&self.engine.config.funding, parts) {
             Ok(task) => task,
             Err(Unfunded) => {
@@ -2717,13 +2761,6 @@ where
 
         // From its share of the charge taken for it: not refused.
         let Ok((cancel_tx, cancel_rx)) = task.watch(()) else {
-            self.reset_inflight(target, inflight_id);
-            return;
-        };
-
-        // A target no longer a member is sent nothing: what was made for it is freed before its
-        // charge goes back.
-        let Some(node) = self.engine.state.membership_state.effective().get_node(&target) else {
             self.reset_inflight(target, inflight_id);
             return;
         };

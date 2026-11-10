@@ -42,6 +42,23 @@ where C: RaftTypeConfig
     /// sync primitives to serialize access to the common internal object, if needed.
     async fn new_client(&mut self, target: C::NodeId, node: &C::Node) -> Self::Network;
 
+    /// The most bytes [`new_client()`](Self::new_client),
+    /// [`new_heartbeat_client()`](Self::new_heartbeat_client) or
+    /// [`new_snapshot_client()`](Self::new_snapshot_client) allocates for a client to `target` at
+    /// `node`, and the client holds until it is dropped: what it copies of the node, say. The
+    /// client's own size is not counted: the task that holds it is charged for it.
+    ///
+    /// A node [`run`](crate::Raft::run) with a funder charges these bytes to the funding the
+    /// client is made for before it asks for the client, and holds the charge until the client
+    /// is dropped; refused, it asks for none. `None`, the default, tells that the factory cannot
+    /// say: a funded node then makes no client. A factory whose clients allocate nothing, or fund
+    /// what they allocate themselves, returns `Some(0)`.
+    #[since(version = "0.10.0")]
+    fn new_client_bytes(&self, target: &C::NodeId, node: &C::Node) -> Option<usize> {
+        let _ = (target, node);
+        None
+    }
+
     /// Create a network client dedicated to sending heartbeat RPCs to the target node.
     ///
     /// This client carries the Leader's liveness probes: the periodic heartbeat that maintains the
@@ -70,4 +87,20 @@ where C: RaftTypeConfig
     async fn new_snapshot_client(&mut self, target: C::NodeId, node: &C::Node) -> Self::Network {
         self.new_client(target, node).await
     }
+}
+
+/// What clients `factory` makes to `targets` allocate between them, as
+/// [`RaftNetworkFactory::new_client_bytes`] tells for each: `None` if it cannot tell for any, or
+/// the sum overflows.
+pub(crate) fn clients_bytes<'a, C, NF, I>(factory: &NF, targets: I) -> Option<usize>
+where
+    C: RaftTypeConfig,
+    NF: RaftNetworkFactory<C>,
+    I: Iterator<Item = (&'a C::NodeId, &'a C::Node)>,
+{
+    let mut bytes = 0usize;
+    for (target, node) in targets {
+        bytes = bytes.checked_add(factory.new_client_bytes(target, node)?)?;
+    }
+    Some(bytes)
 }

@@ -79,8 +79,9 @@ use crate::type_config::async_runtime::mpsc::MpscSender;
 /// through clients of `NF` the logs of `LS`, before any of the stream is made: its task,
 /// everything the runtime allocates for it, the state its task shares with the requests it
 /// streams, its backoff, and the channels that stop it, end its backoff and send it what to
-/// replicate, each held until it is freed. The client is not among them: it funds its own
-/// allocations. A node run with a funder holds two streams charged at once per other member while
+/// replicate, each held until it is freed. Not among them is what its client allocates, which
+/// the factory tells per target ([`RaftNetworkFactory::new_client_bytes`]) and is charged with
+/// them. A node run with a funder holds two streams charged at once per other member while
 /// it rebuilds its streams, as a replaced stream's task may still run until it sees it is
 /// stopped.
 ///
