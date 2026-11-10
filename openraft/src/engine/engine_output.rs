@@ -90,6 +90,13 @@ where
         funding.reserve(&mut self.commands, &mut self.commands_funding, room)
     }
 
+    /// Gives back the charge of the slots of the command queue, and of the queues of responds
+    /// waiting on a condition, once few of them are taken, as [`Funding::shrink`] does.
+    pub(crate) fn shrink(&mut self, funding: &Funding) {
+        funding.shrink(&mut self.commands, &mut self.commands_funding);
+        self.pending_responds.shrink(funding);
+    }
+
     pub(crate) fn len(&self) -> usize {
         self.commands.len()
     }
@@ -174,6 +181,7 @@ mod tests {
     use crate::engine::Respond;
     use crate::engine::testing::UTConfig;
     use crate::engine::testing::log_id;
+    use crate::proposer::funding::KEPT_SLOTS;
     use crate::proposer::funding::testing::Limit;
     use crate::raft::VoteResponse;
     use crate::type_config::TypeConfigExt;
@@ -201,6 +209,35 @@ mod tests {
 
         drop(output);
         assert_eq!(0, enough.held(), "credited back once the buffer is freed");
+    }
+
+    /// Its commands run, the queue gives back the charge of the slots they emptied: the smaller
+    /// buffer is charged before it replaces the larger, and refused, the queue is left as it is.
+    #[test]
+    fn test_shrink_gives_back_the_charge_of_emptied_command_slots() {
+        let room = 4 * KEPT_SLOTS;
+        let slot = size_of::<Command<C>>();
+
+        let full = Limit::new(room * slot);
+        let mut output: EngineOutput<C> = EngineOutput::default();
+        output.reserve(&full.funding(), room).unwrap();
+        output.shrink(&full.funding());
+        assert_eq!(
+            room,
+            output.commands.capacity(),
+            "the smaller buffer refused, it is kept"
+        );
+        assert_eq!(room * slot, full.held());
+
+        let limit = Limit::new(usize::MAX);
+        let mut output: EngineOutput<C> = EngineOutput::default();
+        output.reserve(&limit.funding(), room).unwrap();
+        output.shrink(&limit.funding());
+        assert_eq!(KEPT_SLOTS, output.commands.capacity());
+        assert_eq!(KEPT_SLOTS * slot, limit.held(), "only the slots it keeps are charged");
+
+        drop(output);
+        assert_eq!(0, limit.held());
     }
 
     #[test]

@@ -1377,6 +1377,10 @@ where
         // Progress driven commands run at last because some command may generate progress changes.
         self.run_progress_driven_command().await?;
 
+        // The queues these commands drained give back the charge of the slots they emptied.
+        self.engine.shrink_queues();
+        self.client_responders.shrink(&self.engine.config.funding);
+
         Ok(())
     }
 

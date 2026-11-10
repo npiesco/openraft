@@ -214,6 +214,12 @@ where CLID: RaftCommittedLeaderId
         funding.reserve(&mut self.key_log_ids, held, keys)
     }
 
+    /// Gives back the charge held in `held` for the slots purging emptied, as
+    /// [`Funding::shrink`] does.
+    pub(crate) fn shrink(&mut self, funding: &Funding, held: &mut Option<Charge>) {
+        funding.shrink(&mut self.key_log_ids, held)
+    }
+
     /// How many more leaders' last log ids it has room for without growing.
     pub(crate) fn spare(&self) -> usize {
         self.key_log_ids.capacity() - self.key_log_ids.len()

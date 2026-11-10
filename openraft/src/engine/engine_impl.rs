@@ -910,6 +910,15 @@ where
         lh.transfer_leader(to);
     }
 
+    /// Gives back what the queues it holds are charged for slots they no longer use: its output's
+    /// commands and postponed responds, and the leaders' last log ids purging dropped. See
+    /// [`Funding::shrink`](funding::Funding::shrink).
+    pub(crate) fn shrink_queues(&mut self) {
+        let funding = &self.config.funding;
+        self.output.shrink(funding);
+        self.state.log_ids.shrink(funding, &mut self.log_ids_funding);
+    }
+
     /// Poll for commands automatically generated from I/O progress state.
     ///
     /// Returns commands built by examining I/O progress (submitted vs accepted positions),

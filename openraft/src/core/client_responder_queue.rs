@@ -75,6 +75,12 @@ impl<T> ClientResponderQueue<T> {
         Ok(())
     }
 
+    /// Gives back the charge of the buffer's slots once few of them hold responders, as
+    /// [`Funding::shrink`] does.
+    pub(crate) fn shrink(&mut self, funding: &Funding) {
+        funding.shrink(&mut self.responders, &mut self.buffer)
+    }
+
     /// Pushes a responder to the end of the queue.
     ///
     /// # Panics
@@ -171,6 +177,7 @@ impl<T> Default for ClientResponderQueue<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::proposer::funding::KEPT_SLOTS;
     use crate::proposer::funding::testing::Limit;
 
     type TestQueue = ClientResponderQueue<u64>;
@@ -314,6 +321,37 @@ mod tests {
 
         drop(queue);
         assert_eq!(limit.held(), 0, "the buffer's charge returns once it is freed");
+    }
+
+    /// Drained, the queue gives back the charge of the slots it emptied: its buffer shrinks to
+    /// twice what it still holds, at least `KEPT_SLOTS`, charged before the larger one is freed.
+    #[test]
+    fn test_shrink_gives_back_the_charge_of_drained_slots() {
+        let slot = size_of::<(u64, u64)>();
+        let limit = Limit::new(usize::MAX);
+        let funding = limit.funding();
+        let mut queue = TestQueue::new();
+
+        let count = 4 * KEPT_SLOTS as u64;
+        queue.reserve(4 * KEPT_SLOTS, &funding).unwrap();
+        queue.extend((1..=count).map(|i| (i, i)));
+        queue.shrink(&funding);
+        assert_eq!(queue.responders.capacity(), 4 * KEPT_SLOTS, "full, it is kept");
+
+        let (drained, charge) = queue.drain_upto(count - 1);
+        drop((drained, charge));
+        assert_eq!(limit.held(), 4 * KEPT_SLOTS * slot + slot);
+
+        queue.shrink(&funding);
+        assert_eq!(queue.responders.capacity(), KEPT_SLOTS);
+        assert_eq!(
+            limit.held(),
+            KEPT_SLOTS * slot + slot,
+            "the emptied slots' charge is given back"
+        );
+
+        drop(queue);
+        assert_eq!(limit.held(), 0);
     }
 
     #[test]

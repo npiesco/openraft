@@ -124,7 +124,32 @@ impl Funding {
         *held = charge;
         Ok(())
     }
+
+    /// Gives back what the capacity of `queue` is charged beyond what its items need: once it
+    /// holds a quarter of its slots or fewer, and has more than [`KEPT_SLOTS`], it is shrunk to
+    /// twice its items, at least [`KEPT_SLOTS`]. The smaller buffer is charged before it is
+    /// allocated and held in `held` in place of the larger one's charge, credited back only once
+    /// the larger buffer is freed. Left as it is if it holds no charge, or the smaller buffer is
+    /// refused.
+    pub(crate) fn shrink<B: Buffer>(&self, queue: &mut B, held: &mut Option<Charge>) {
+        let slot = size_of::<B::Item>();
+        let slots = queue.slots();
+        if held.is_none() || slot == 0 || slots <= KEPT_SLOTS || queue.items().saturating_mul(4) > slots {
+            return;
+        }
+        let capacity = queue.items().saturating_mul(2).max(KEPT_SLOTS);
+        let Ok(charge) = self.charge(capacity * slot) else {
+            return;
+        };
+        queue.shrink_exact(capacity);
+        debug_assert!(queue.slots() <= capacity, "shrunk to the capacity charged");
+        *held = charge;
+    }
 }
+
+/// The slots below which [`Funding::shrink`] keeps a queue as it is, and to which at least it
+/// shrinks one: a queue drained each turn is not freed and grown again each turn.
+pub(crate) const KEPT_SLOTS: usize = 32;
 
 /// A buffer of contiguous slots, grown by [`Funding::reserve`] once the capacity it grows to is
 /// charged.
@@ -139,6 +164,9 @@ pub(crate) trait Buffer {
 
     /// Room for `more` items than it holds, exactly, or the allocator's refusal.
     fn grow_exact(&mut self, more: usize) -> Result<(), TryReserveError>;
+
+    /// Its slots shrunk to `capacity`, or to the items it holds if they are more.
+    fn shrink_exact(&mut self, capacity: usize);
 }
 
 impl<T> Buffer for VecDeque<T> {
@@ -155,6 +183,10 @@ impl<T> Buffer for VecDeque<T> {
     fn grow_exact(&mut self, more: usize) -> Result<(), TryReserveError> {
         self.try_reserve_exact(more)
     }
+
+    fn shrink_exact(&mut self, capacity: usize) {
+        self.shrink_to(capacity)
+    }
 }
 
 impl<T> Buffer for Vec<T> {
@@ -170,6 +202,10 @@ impl<T> Buffer for Vec<T> {
 
     fn grow_exact(&mut self, more: usize) -> Result<(), TryReserveError> {
         self.try_reserve_exact(more)
+    }
+
+    fn shrink_exact(&mut self, capacity: usize) {
+        self.shrink_to(capacity)
     }
 }
 
@@ -801,5 +837,71 @@ pub(crate) mod testing {
         fn release(&self, bytes: usize) {
             self.held.fetch_sub(bytes, Ordering::SeqCst);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::VecDeque;
+
+    use super::KEPT_SLOTS;
+    use super::testing::Limit;
+    use crate::metered::metered;
+
+    /// A queue drained to a quarter of its slots or fewer is shrunk, and its charge drops to
+    /// what the smaller buffer holds; it is kept at [`KEPT_SLOTS`] at least.
+    #[test]
+    fn test_shrink_gives_back_the_charge_of_the_slots_it_frees() {
+        let slot = size_of::<u64>();
+        let limit = Limit::new(usize::MAX);
+        let funding = limit.funding();
+        let mut queue = VecDeque::<u64>::new();
+        let mut held = None;
+
+        funding.reserve(&mut queue, &mut held, 1024).unwrap();
+        queue.extend(0..1024);
+        assert_eq!(queue.capacity() * slot, limit.held());
+
+        queue.drain(..1000).for_each(drop);
+        funding.shrink(&mut queue, &mut held);
+        assert_eq!(48, queue.capacity(), "shrunk to twice its items");
+        assert_eq!(48 * slot, limit.held(), "charged only the smaller buffer");
+
+        queue.clear();
+        funding.shrink(&mut queue, &mut held);
+        assert_eq!(
+            KEPT_SLOTS,
+            queue.capacity(),
+            "kept at the slots below which it is not shrunk"
+        );
+        assert_eq!(KEPT_SLOTS * slot, limit.held());
+
+        funding.shrink(&mut queue, &mut held);
+        assert_eq!(KEPT_SLOTS, queue.capacity());
+
+        drop(queue);
+        drop(held);
+        assert_eq!(0, limit.held());
+    }
+
+    /// A shrink the funder refuses the smaller buffer for leaves the queue and its charge as they
+    /// are, allocating nothing.
+    #[test]
+    fn test_a_refused_shrink_allocates_nothing() {
+        let slot = size_of::<u64>();
+        let limit = Limit::new(1024 * slot);
+        let funding = limit.funding();
+        let mut queue = VecDeque::<u64>::new();
+        let mut held = None;
+        funding.reserve(&mut queue, &mut held, 1024).unwrap();
+        queue.extend(0..1024);
+        queue.drain(..1000).for_each(drop);
+        let (capacity, charged) = (queue.capacity(), limit.held());
+
+        let ((), meter) = metered(|| funding.shrink(&mut queue, &mut held));
+
+        assert_eq!(0, meter.allocated, "refused, nothing allocated");
+        assert_eq!(capacity, queue.capacity());
+        assert_eq!(charged, limit.held());
     }
 }
