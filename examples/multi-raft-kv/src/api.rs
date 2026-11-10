@@ -69,7 +69,7 @@ pub async fn snapshot(app: &mut GroupApp, req: String) -> String {
         meta: snapshot_meta,
         snapshot: Cursor::new(snapshot_data),
     };
-    let res = app.raft.install_full_snapshot(vote, snapshot).await.map_err(RaftError::<Infallible>::Fatal);
+    let res = app.raft.install_full_snapshot(vote, snapshot).await;
     encode(res)
 }
 

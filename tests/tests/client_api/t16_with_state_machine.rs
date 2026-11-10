@@ -4,6 +4,7 @@ use anyhow::Result;
 use maplit::btreeset;
 use openraft::Config;
 use openraft::errors::Fatal;
+use openraft::errors::RaftError;
 
 use crate::fixtures::MemStateMachine;
 use crate::fixtures::RaftRouter;
@@ -47,7 +48,7 @@ async fn with_state_machine() -> Result<()> {
     n0.shutdown().await?;
 
     let res = n0.with_state_machine(|_sm: &mut MemStateMachine| Box::pin(async move {})).await;
-    assert_eq!(Err(Fatal::Stopped), res);
+    assert_eq!(Err(RaftError::Fatal(Fatal::Stopped)), res);
 
     Ok(())
 }

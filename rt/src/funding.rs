@@ -36,9 +36,31 @@ impl Charge {
         })
     }
 
+    /// `bytes` its holder already charged to `funder`, as part of a larger charge it waited for,
+    /// handed over to a charge of their own: credited back to `funder` when this is dropped, as
+    /// a charge [`take`](Self::take)n is, and no longer by what held them. Another handle on
+    /// `funder` is taken, which allocates nothing.
+    pub fn prepaid(funder: &Arc<dyn Funder>, bytes: usize) -> Charge {
+        Charge {
+            bytes,
+            funder: funder.clone(),
+        }
+    }
+
     /// The bytes it holds charged.
     pub fn bytes(&self) -> usize {
         self.bytes
+    }
+
+    /// `bytes` of this charge split off into a charge of their own, credited back when that is
+    /// dropped and no longer when this is; `None`, this charge unchanged, if it holds fewer.
+    /// Allocates nothing.
+    pub fn split(&mut self, bytes: usize) -> Option<Charge> {
+        self.bytes = self.bytes.checked_sub(bytes)?;
+        Some(Charge {
+            bytes,
+            funder: self.funder.clone(),
+        })
     }
 }
 

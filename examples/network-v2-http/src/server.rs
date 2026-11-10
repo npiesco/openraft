@@ -110,8 +110,7 @@ where
                 meta,
                 snapshot: Cursor::new(data),
             };
-            let res: Result<SnapshotResponse<C>, RaftError<C>> =
-                raft.install_full_snapshot(vote, snapshot).await.map_err(RaftError::Fatal);
+            let res: Result<SnapshotResponse<C>, RaftError<C>> = raft.install_full_snapshot(vote, snapshot).await;
 
             Ok(json_response(&res))
         }

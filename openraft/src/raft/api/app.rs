@@ -115,21 +115,26 @@ where C: RaftTypeConfig
     /// This is more efficient than calling [`client_write()`](Self::client_write) multiple times
     /// as it sends all payloads in a single message to the Raft core.
     ///
-    /// If RaftCore stops, the stream yields `Err(Fatal::Stopped)` and ends.
+    /// If RaftCore stops, the stream yields `Err(Fatal::Stopped)` and ends. The channels the
+    /// results arrive on are charged to the node's funder, all before any is made: refused as
+    /// `Unfunded`, no channel made, nothing sent.
     #[since(version = "0.10.0")]
     #[tracing::instrument(level = "debug", skip_all)]
     pub(crate) async fn client_write_many(
         &self,
         payloads: impl IntoIterator<Item = PayloadOf<C>>,
-    ) -> Result<BoxStream<'static, Result<WriteResult<C>, Fatal<C>>>, Fatal<C>> {
+    ) -> Result<BoxStream<'static, Result<WriteResult<C>, Fatal<C>>>, RaftError<C>> {
         let payloads: Vec<PayloadOf<C>> = payloads.into_iter().collect();
+        let mut channels = self.inner.oneshot_charge::<ClientWriteResult<C>>(payloads.len())?;
 
         let mut responders = Vec::with_capacity(payloads.len());
         let mut receivers = Vec::with_capacity(payloads.len());
 
         for _ in 0..payloads.len() {
-            let (responder, complete_rx) = ProgressResponder::<C, ClientWriteResult<C>>::complete_only();
-            responders.push(Some(CoreResponder::Progress(responder)));
+            let (complete_tx, complete_rx) = channels.channel()?;
+            responders.push(Some(CoreResponder::Progress(ProgressResponder::completing(
+                complete_tx,
+            ))));
             receivers.push(complete_rx);
         }
 

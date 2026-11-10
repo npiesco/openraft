@@ -126,6 +126,7 @@ use crate::errors::ForwardToLeader;
 use crate::errors::InitializeError;
 use crate::errors::LinearizableReadError;
 use crate::errors::RaftError;
+use crate::errors::Unfunded;
 use crate::errors::into_raft_result::IntoRaftResult;
 use crate::membership::IntoNodes;
 use crate::metrics::MetricsRecorder;
@@ -136,6 +137,7 @@ use crate::metrics::Wait;
 use crate::metrics::WaitError;
 use crate::network::NetSnapshot;
 use crate::raft::raft_inner::RaftInner;
+use crate::raft::responder::ProgressResponder;
 pub use crate::raft::runtime_config_handle::RuntimeConfigHandle;
 use crate::raft::trigger::Trigger;
 use crate::raft_state::IOId;
@@ -147,6 +149,7 @@ use crate::type_config::alias::LogIdOf;
 use crate::type_config::alias::MpscSenderOf;
 use crate::type_config::alias::MpscWeakSenderOf;
 use crate::type_config::alias::NodeIdOf;
+use crate::type_config::alias::OneshotReceiverOf;
 use crate::type_config::alias::SnapshotOf;
 use crate::type_config::alias::VoteOf;
 use crate::type_config::alias::WatchReceiverOf;
@@ -718,7 +721,7 @@ where
 
     /// [`run`](Self::run), with what the node allocates for its owner charged to `funder` before
     /// it is made: the channel each call waits on for the core's answer. A call whose channel
-    /// `funder` refuses is answered with [`Unfunded`](crate::errors::Unfunded), nothing sent.
+    /// `funder` refuses is answered with [`Unfunded`], nothing sent.
     ///
     /// Like [`run`](Self::run), it has no effect on a node already running or stopped: the node
     /// keeps the funding it was started with.
@@ -814,8 +817,6 @@ where
     /// Sends a message to RaftCore to retrieve the current runtime statistics.
     /// This returns a snapshot of the stats at the time of the call, or [`Unfunded`] if the
     /// node's funder refuses the channel it waits on.
-    ///
-    /// [`Unfunded`]: crate::errors::Unfunded
     #[since(version = "0.10.0", change = "fails as `RaftError`, which may be `Unfunded`")]
     #[cfg(feature = "runtime-stats")]
     pub async fn runtime_stats(&self) -> Result<RuntimeStats<C>, RaftError<C>> {
@@ -1120,10 +1121,12 @@ where
     ///
     /// The request is served directly by the state-machine worker, not `RaftCore`. It returns an
     /// error only when that worker fails to serve it, e.g., encountering a storage error or having
-    /// stopped (`Fatal::Stopped`), which can occur while `RaftCore` is still running.
+    /// stopped (`Fatal::Stopped`), which can occur while `RaftCore` is still running, or
+    /// [`Unfunded`], nothing sent, when the node's funder refuses the
+    /// channel the snapshot arrives on.
     #[tracing::instrument(level = "debug", skip_all)]
     pub async fn get_snapshot(&self) -> Result<Option<SnapshotOf<C, SM::SnapshotData>>, RaftError<C>> {
-        self.protocol_api().get_snapshot().await.into_raft_result()
+        self.protocol_api().get_snapshot().await
     }
 
     /// Install a completely received snapshot to the state machine.
@@ -1144,6 +1147,7 @@ where
     ///
     /// Such input indicates a forged or corrupted snapshot, e.g., one built by a previous
     /// incarnation of the cluster. Installing it would corrupt the log id order.
+    #[since(version = "0.10.0", change = "fails as `RaftError`, which may be `Unfunded`")]
     #[since(
         version = "0.10.0",
         change = "panic on a snapshot inconsistent with the vote or with locally committed logs"
@@ -1154,7 +1158,7 @@ where
         &self,
         vote: VoteOf<C>,
         snapshot: SnapshotOf<C, SM::SnapshotData>,
-    ) -> Result<SnapshotResponse<C>, Fatal<C>> {
+    ) -> Result<SnapshotResponse<C>, RaftError<C>> {
         self.protocol_api().install_full_snapshot(vote, snapshot).await
     }
 
@@ -1383,6 +1387,9 @@ where
     /// This is more efficient than calling [`client_write()`](Self::client_write) multiple times
     /// as it sends all payloads in a single message to the Raft core.
     ///
+    /// The channels the results arrive on are charged to the node's funder (see
+    /// [`Raft::run_funded`]) before any is made: refused as [`Unfunded`], nothing sent.
+    ///
     /// # Examples
     ///
     /// ```ignore
@@ -1398,13 +1405,26 @@ where
     ///     }
     /// }
     /// ```
+    #[since(version = "0.10.0", change = "fails as `RaftError`, which may be `Unfunded`")]
     #[since(version = "0.10.0")]
     #[tracing::instrument(level = "debug", skip_all)]
     pub async fn client_write_many(
         &self,
         app_data: impl IntoIterator<Item = C::D>,
-    ) -> Result<BoxStream<'static, Result<WriteResult<C>, Fatal<C>>>, Fatal<C>> {
+    ) -> Result<BoxStream<'static, Result<WriteResult<C>, Fatal<C>>>, RaftError<C>> {
         self.app_api().client_write_many(app_data.into_iter().map(C::Payload::normal)).await
+    }
+
+    /// A [`ProgressResponder`] notifying only the completion, and the receiver of its result:
+    /// on a node run funded (see [`Raft::run_funded`]), its channel is charged to the node's
+    /// funder before it is made and the charge held until both halves are dropped; refused as
+    /// [`Unfunded`], nothing allocated, if the funder refuses it. Prefer this to
+    /// [`ProgressResponder::complete_only`], which makes the channel uncharged.
+    #[since(version = "0.10.0")]
+    pub fn complete_only<T>(&self) -> Result<(ProgressResponder<C, T>, OneshotReceiverOf<C, T>), Unfunded>
+    where T: OptionalSend {
+        let (complete_tx, complete_rx) = self.inner.oneshot()?;
+        Ok((ProgressResponder::completing(complete_tx), complete_rx))
     }
 
     /// Submit a write request to Raft.
@@ -1420,8 +1440,8 @@ where
     /// // Fire-and-forget
     /// raft.write(my_data).await?;
     ///
-    /// // With responder
-    /// let (responder, rx) = ProgressResponder::complete_only();
+    /// // With responder, its channel charged to the node's funder
+    /// let (responder, rx) = raft.complete_only()?;
     /// raft.write(my_data).responder(responder).await?;
     /// let result = rx.await??;
     ///
@@ -1470,8 +1490,9 @@ where
 
     /// Return `true` if this node is already initialized and cannot be initialized again with
     /// [`Raft::initialize`]
+    #[since(version = "0.10.0", change = "fails as `RaftError`, which may be `Unfunded`")]
     #[since(version = "0.10.0")]
-    pub async fn is_initialized(&self) -> Result<bool, Fatal<C>> {
+    pub async fn is_initialized(&self) -> Result<bool, RaftError<C>> {
         let initialized = self.with_raft_state(|st| st.is_initialized()).await?;
 
         Ok(initialized)
@@ -1553,8 +1574,9 @@ where
     /// Provides read-only access to [`RaftState`] through a user-provided function.
     ///
     /// The function `func` is applied to the current [`RaftState`]. The result of this function,
-    /// of type `V`, is returned wrapped in `Result<V, Fatal<C>>`. `Fatal` error will be
-    /// returned if failed to receive a reply from `RaftCore`.
+    /// of type `V`, is returned wrapped in `Result<V, RaftError<C>>`. `Fatal` error will be
+    /// returned if failed to receive a reply from `RaftCore`; [`Unfunded`], nothing sent, if the
+    /// node's funder refuses the channel the reply arrives on (see [`Raft::run_funded`]).
     ///
     /// A `Fatal` error is returned if:
     /// - Raft core task is stopped normally.
@@ -1565,12 +1587,13 @@ where
     /// ```ignore
     /// let committed = my_raft.with_raft_state(|st| st.committed).await?;
     /// ```
-    pub async fn with_raft_state<F, V>(&self, func: F) -> Result<V, Fatal<C>>
+    #[since(version = "0.10.0", change = "fails as `RaftError`, which may be `Unfunded`")]
+    pub async fn with_raft_state<F, V>(&self, func: F) -> Result<V, RaftError<C>>
     where
         F: FnOnce(&RaftState<C>) -> V + OptionalSend + 'static,
         V: OptionalSend + 'static,
     {
-        let (tx, rx) = C::oneshot();
+        let (tx, rx) = self.inner.oneshot()?;
 
         self.external_request(|st| {
             let result = func(st);
@@ -1585,7 +1608,7 @@ where
             Err(err) => {
                 tracing::error!("{}: rx recv error: {}", func_name!(), err);
                 let fatal = self.inner.get_core_stop_error().await;
-                Err(fatal)
+                Err(fatal.into())
             }
         }
     }
@@ -2106,7 +2129,9 @@ where
     /// Provides mutable access to [`RaftStateMachine`] through a user-provided function.
     ///
     /// The function `func` is applied to the current [`RaftStateMachine`]. The result of this
-    /// function, of type `V`, is returned wrapped in `Result<V, Fatal<C>>`.
+    /// function, of type `V`, is returned wrapped in `Result<V, RaftError<C>>`: [`Unfunded`],
+    /// nothing sent, if the node's funder refuses the channel the result arrives on (see
+    /// [`Raft::run_funded`]).
     ///
     /// A `Fatal` error is returned if:
     /// - Raft core task is stopped normally.
@@ -2121,14 +2146,15 @@ where
     ///     async move { sm.last_applied().await }
     /// }).await?;
     /// ```
+    #[since(version = "0.10.0", change = "fails as `RaftError`, which may be `Unfunded`")]
     #[since(version = "0.10.0")]
-    pub async fn with_state_machine<F, V>(&self, func: F) -> Result<V, Fatal<C>>
+    pub async fn with_state_machine<F, V>(&self, func: F) -> Result<V, RaftError<C>>
     where
         SM: OptionalSend + 'static,
         F: FnOnce(&mut SM) -> BoxFuture<V> + OptionalSend + 'static,
         V: OptionalSend + 'static,
     {
-        let (tx, rx) = C::oneshot();
+        let (tx, rx) = self.inner.oneshot()?;
 
         self.external_state_machine_request(|sm| {
             Box::pin(async move {
@@ -2144,7 +2170,7 @@ where
         // own (e.g. a panic in `func`) while RaftCore keeps running. An unbounded join on the core
         // would then hang forever. `recv_msg` waits only up to `RECV_CORE_STOP_TIMEOUT` before
         // resolving to `Fatal::Stopped`.
-        self.inner.recv_msg(rx).await
+        Ok(self.inner.recv_msg(rx).await?)
     }
 
     /// Send a request to the [`RaftStateMachine`] worker in a fire-and-forget manner.

@@ -1,11 +1,10 @@
 //! Oneshot channel traits.
 
 use std::future::Future;
-use std::sync::Arc;
 
 use openraft_macros::since;
 
-use crate::Funder;
+use crate::Charge;
 use crate::OptionalSend;
 
 /// A oneshot channel for sending a single value between asynchronous tasks.
@@ -29,15 +28,24 @@ pub trait Oneshot {
     fn channel<T>() -> (Self::Sender<T>, Self::Receiver<T>)
     where T: OptionalSend;
 
-    /// Creates a one-shot channel like [`channel`](Self::channel), its shared block charged to
-    /// `funder` before it is allocated, the charge held until both handles are dropped and the
-    /// block is freed.
+    /// The bytes of the shared block a channel carrying `T` allocates, which a funded channel is
+    /// charged before it is made: see [`charged_channel`](Self::charged_channel).
     ///
-    /// `None`, with nothing allocated, if `funder` refuses the block or the runtime cannot fund
-    /// its channels, which by default it cannot.
-    fn funded_channel<T>(_funder: &Arc<dyn Funder>) -> Option<(Self::Sender<T>, Self::Receiver<T>)>
+    /// `None` if the runtime cannot fund its channels, which by default it cannot.
+    fn block_bytes<T>() -> Option<usize>
     where T: OptionalSend {
         None
+    }
+
+    /// Creates a one-shot channel like [`channel`](Self::channel), its shared block funded by
+    /// `charge`, taken before for [`block_bytes`](Self::block_bytes), and held until both
+    /// handles are dropped and the block is freed.
+    ///
+    /// `charge` is given back, with nothing allocated, if it does not hold the block's bytes or
+    /// the runtime cannot fund its channels, which by default it cannot.
+    fn charged_channel<T>(charge: Charge) -> Result<(Self::Sender<T>, Self::Receiver<T>), Charge>
+    where T: OptionalSend {
+        Err(charge)
     }
 }
 

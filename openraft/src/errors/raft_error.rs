@@ -65,6 +65,17 @@ where C: RaftTypeConfig
     pub fn unwrap_fatal(self) -> Fatal<C> {
         self.into_fatal().unwrap()
     }
+
+    /// Widen to a `RaftError` of any API error type: an error without an API error carries
+    /// over unchanged as `Fatal` or `Unfunded`.
+    #[since(version = "0.10.0")]
+    pub fn widen<E>(self) -> RaftError<C, E> {
+        match self {
+            RaftError::APIError(never) => match never {},
+            RaftError::Fatal(f) => RaftError::Fatal(f),
+            RaftError::Unfunded(u) => RaftError::Unfunded(u),
+        }
+    }
 }
 
 impl<C, E> RaftError<C, E>

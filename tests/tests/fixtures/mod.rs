@@ -766,7 +766,7 @@ impl TypedRaftRouter {
     }
 
     /// Send external request to the particular node.
-    pub async fn with_raft_state<V, F>(&self, target: MemNodeId, func: F) -> Result<V, Fatal<MemConfig>>
+    pub async fn with_raft_state<V, F>(&self, target: MemNodeId, func: F) -> Result<V, RaftError<MemConfig>>
     where
         F: FnOnce(&RaftState<MemConfig>) -> V + Send + 'static,
         V: Send + 'static,

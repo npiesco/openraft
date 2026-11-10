@@ -4,6 +4,7 @@ use anyhow::Result;
 use maplit::btreeset;
 use openraft::Config;
 use openraft::errors::Fatal;
+use openraft::errors::RaftError;
 
 use crate::fixtures::RaftRouter;
 use crate::fixtures::log_id;
@@ -42,7 +43,7 @@ async fn with_raft_state() -> Result<()> {
         n0.shutdown().await?;
 
         let res = n0.with_raft_state(|st| st.local_committed().cloned()).await;
-        assert_eq!(Err(Fatal::Stopped), res);
+        assert_eq!(Err(RaftError::Fatal(Fatal::Stopped)), res);
     }
 
     Ok(())

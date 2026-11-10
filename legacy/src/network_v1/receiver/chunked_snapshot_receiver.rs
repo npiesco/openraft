@@ -132,7 +132,7 @@ where
             let snapshot_data = self
                 .with_state_machine(|sm| Box::pin(async move { sm.begin_receiving_snapshot().await }))
                 .await
-                .map_err(RaftError::Fatal)?
+                .map_err(|e| e.widen::<InstallSnapshotError>())?
                 .map_err(|e| {
                     RaftError::Fatal(Fatal::from(StorageError::write_snapshot(
                         None,
@@ -167,7 +167,9 @@ where
                 snapshot: data,
             };
 
-            self.install_full_snapshot(vote.clone(), snapshot).await.map_err(RaftError::Fatal)?;
+            self.install_full_snapshot(vote.clone(), snapshot)
+                .await
+                .map_err(|e| e.widen::<InstallSnapshotError>())?;
         }
 
         // Return response with current vote from metrics

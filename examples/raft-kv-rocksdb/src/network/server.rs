@@ -80,7 +80,7 @@ impl Server {
             meta,
             snapshot: received,
         };
-        let result = self.raft.install_full_snapshot(vote, snapshot).await.map_err(RaftError::Fatal);
+        let result = self.raft.install_full_snapshot(vote, snapshot).await;
         Ok(result)
     }
 }

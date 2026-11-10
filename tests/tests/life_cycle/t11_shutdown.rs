@@ -151,7 +151,7 @@ async fn with_state_machine_returns_stopped_when_func_panics() -> Result<()> {
         let res = raft
             .with_state_machine::<_, ()>(|_sm| Box::pin(async move { panic!("injected worker panic") }))
             .await;
-        assert_eq!(Fatal::Stopped, res.unwrap_err());
+        assert_eq!(Fatal::Stopped, res.unwrap_err().unwrap_fatal());
     }
 
     Ok(())

@@ -2,10 +2,14 @@ use openraft_macros::since;
 
 use crate::OptionalSend;
 use crate::RaftTypeConfig;
+use crate::async_runtime::Charge;
+use crate::async_runtime::Oneshot;
 use crate::async_runtime::OneshotSender;
+use crate::errors::Unfunded;
 use crate::raft::responder::Responder;
 use crate::type_config::TypeConfigExt;
 use crate::type_config::alias::LogIdOf;
+use crate::type_config::alias::OneshotOf;
 use crate::type_config::alias::OneshotReceiverOf;
 use crate::type_config::alias::OneshotSenderOf;
 
@@ -19,7 +23,9 @@ use crate::type_config::alias::OneshotSenderOf;
 /// 1. When the entry is committed and safe to read
 /// 2. When the entry is applied and the result is available
 ///
-/// Use [`ProgressResponder::complete_only()`] when the caller only needs the final result.
+/// Use [`ProgressResponder::complete_only()`] when the caller only needs the final result, or
+/// [`Raft::complete_only()`](crate::Raft::complete_only) for one whose channel is charged to the
+/// node's funder.
 ///
 /// # Example
 ///
@@ -88,6 +94,17 @@ where
         };
 
         (responder, complete_rx)
+    }
+
+    /// A responder with only a complete receiver, as [`Self::complete_only`] makes, its channel's
+    /// block funded by `charge`, which the caller took for it beforehand (see
+    /// [`Oneshot::block_bytes`]): held until both halves are dropped and the block is freed.
+    /// Refused as [`Unfunded`], nothing allocated and `charge` credited back, if it does not hold
+    /// the block or the runtime cannot fund its channels.
+    #[since(version = "0.10.0")]
+    pub fn charged(charge: Charge) -> Result<(Self, OneshotReceiverOf<C, T>), Unfunded> {
+        let (complete_tx, complete_rx) = OneshotOf::<C>::charged_channel(charge).map_err(|_| Unfunded)?;
+        Ok((Self::completing(complete_tx), complete_rx))
     }
 
     /// A responder with only a complete sender, `complete_tx`, made by the caller: one whose

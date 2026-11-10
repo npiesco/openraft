@@ -101,19 +101,21 @@ where C: RaftTypeConfig
             retain
         );
 
-        // Every channel of both steps is the caller's, made before anything is sent: refused, the
-        // change is not proposed, and a joint entry never waits for a second step that could not
-        // be funded.
-        let (tx, rx) = self.inner.oneshot()?;
+        // Every channel of both steps is the caller's, all charged before any is made, and made
+        // before anything is sent: refused, none is made, the change is not proposed, and a joint
+        // entry never waits for a second step that could not be funded.
+        let mut steps = self.inner.oneshot_charge::<ClientWriteResult<C>>(2)?;
+        let mut unused = self.inner.oneshot_charge::<C::Payload>(1)?;
+        let (tx, rx) = steps.channel()?;
         let tx = ProgressResponder::<C, _>::completing(tx);
-        let (uniform_tx, uniform_rx) = self.inner.oneshot()?;
+        let (uniform_tx, uniform_rx) = steps.channel()?;
 
         tracing::debug!("change_membership: start",);
 
         // `RaftCore` computes the membership, so only `RaftCore` can tell whether this change
         // needs a joint membership. It spends `joint_payload` on a joint membership and
         // `uniform_payload` on a uniform one, and returns the payload it did not spend.
-        let (unused_tx, unused_rx) = self.inner.oneshot()?;
+        let (unused_tx, unused_rx) = unused.channel()?;
         let payloads = MembershipPayloads::JointOrUniform {
             joint: joint_payload,
             uniform: uniform_payload,
@@ -229,6 +231,10 @@ where C: RaftTypeConfig
     ) -> Result<ClientWriteResult<C>, RaftError<C>> {
         tracing::info!("append_membership: proposed membership: {}", membership);
 
+        // The channel is charged before the membership is bound, which allocates, and made only
+        // once it is bound: refused either way, nothing is made for a call that is not sent.
+        let mut charge = self.inner.oneshot_charge::<ClientWriteResult<C>>(1)?;
+
         // Bind the membership into the payload here, so the core has exactly one value to
         // validate and to write: the payload it receives.
         let payload = match payload.bind_membership(membership) {
@@ -236,7 +242,7 @@ where C: RaftTypeConfig
             Err(refused) => return Ok(Err(ClientWriteError::ChangeMembershipError(refused.into()))),
         };
 
-        let (tx, rx) = self.inner.oneshot()?;
+        let (tx, rx) = charge.channel()?;
         let tx = ProgressResponder::<C, _>::completing(tx);
 
         let msg = RaftMsg::AppendMembership {

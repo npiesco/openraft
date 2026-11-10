@@ -162,12 +162,12 @@ where
 
     #[since(version = "0.10.0")]
     #[tracing::instrument(level = "debug", skip_all)]
-    pub(crate) async fn get_snapshot(&self) -> Result<Option<SmSnapshotOf<C, SM>>, Fatal<C>> {
+    pub(crate) async fn get_snapshot(&self) -> Result<Option<SmSnapshotOf<C, SM>>, RaftError<C>> {
         tracing::debug!("Raft::get_snapshot()");
 
-        let (tx, rx) = C::oneshot();
+        let (tx, rx) = self.inner.oneshot()?;
         self.send_sm_command(sm::Command::get_snapshot(tx)).await?;
-        self.inner.recv_msg(rx).await
+        Ok(self.inner.recv_msg(rx).await?)
     }
 
     #[since(version = "0.10.0")]
@@ -176,18 +176,18 @@ where
         &self,
         vote: VoteOf<C>,
         snapshot: SmSnapshotOf<C, SM>,
-    ) -> Result<SnapshotResponse<C>, Fatal<C>> {
+    ) -> Result<SnapshotResponse<C>, RaftError<C>> {
         tracing::info!("Raft::install_full_snapshot()");
 
-        let (tx, rx) = C::oneshot();
+        let (tx, rx) = self.inner.oneshot()?;
         let req = InstallFullSnapshotRequest { vote, snapshot, tx };
 
         let send_res = self.install_snapshot_tx.send(req).await;
         if send_res.is_err() {
-            return Err(self.inner.get_core_stop_error().await);
+            return Err(self.inner.get_core_stop_error().await.into());
         }
 
-        self.inner.recv_msg(rx).await
+        Ok(self.inner.recv_msg(rx).await?)
     }
 
     #[since(version = "0.10.0")]

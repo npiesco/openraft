@@ -32,8 +32,8 @@ use crate::type_config::alias::WriteResponderOf;
 /// // Fire-and-forget
 /// raft.write(my_data).await?;
 ///
-/// // With responder to receive result
-/// let (responder, complete_rx) = ProgressResponder::complete_only();
+/// // With responder to receive result, its channel charged to the node's funder
+/// let (responder, complete_rx) = raft.complete_only()?;
 /// raft.write(my_data).responder(responder).await?;
 /// let result = complete_rx.await??;
 /// ```
@@ -61,9 +61,7 @@ where C: RaftTypeConfig
     /// # Examples
     ///
     /// ```ignore
-    /// use openraft::impls::ProgressResponder;
-    ///
-    /// let (responder, complete_rx) = ProgressResponder::complete_only();
+    /// let (responder, complete_rx) = raft.complete_only()?;
     /// raft.write(my_data).responder(responder).await?;
     /// let result = complete_rx.await??;
     /// ```
@@ -128,6 +126,21 @@ where C: RaftTypeConfig
         self.expected_leader = Some(expected_leader.into());
         self
     }
+
+    /// Send the write to RaftCore, as awaiting the request does, without boxing the future: a
+    /// caller that funds what it allocates awaits this future in place.
+    #[since(version = "0.10.0")]
+    pub async fn send(self) -> Result<(), Fatal<C>> {
+        self.inner
+            .send_msg(RaftMsg::ClientWrite {
+                payloads: Batch::of([C::Payload::normal(self.app_data)]),
+                responders: Batch::of([self.responder]),
+                expected_leader: self.expected_leader,
+                #[cfg(feature = "runtime-stats")]
+                proposed_at: propose_at_now::<C>(),
+            })
+            .await
+    }
 }
 
 impl<'a, C> IntoFuture for WriteRequest<'a, C>
@@ -137,16 +150,6 @@ where C: RaftTypeConfig
     type IntoFuture = BoxFuture<'a, Self::Output>;
 
     fn into_future(self) -> Self::IntoFuture {
-        Box::pin(async move {
-            self.inner
-                .send_msg(RaftMsg::ClientWrite {
-                    payloads: Batch::of([C::Payload::normal(self.app_data)]),
-                    responders: Batch::of([self.responder]),
-                    expected_leader: self.expected_leader,
-                    #[cfg(feature = "runtime-stats")]
-                    proposed_at: propose_at_now::<C>(),
-                })
-                .await
-        })
+        Box::pin(self.send())
     }
 }
