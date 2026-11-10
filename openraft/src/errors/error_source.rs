@@ -52,7 +52,33 @@ pub trait ErrorSource: Error + Clone + PartialEq + Eq + OptionalSend + OptionalS
     fn from_error<E: Error + 'static>(error: &E) -> Self;
 
     /// Create an error from a string message.
+    ///
+    /// The message is given as [`ToString`]: an implementation that keeps its text writes it into
+    /// a `String`, which allocates. Openraft itself makes errors from text only through
+    /// [`from_static`](Self::from_static) and [`from_args`](Self::from_args).
     fn from_string(msg: impl ToString) -> Self;
+
+    /// Create an error from a fixed reason.
+    ///
+    /// The default implementation calls [`from_string`](Self::from_string). Override it to keep
+    /// the reason as the `&'static str` it is, allocating nothing, as
+    /// [`BoxedErrorSource`](crate::impls::BoxedErrorSource) does.
+    fn from_static(reason: &'static str) -> Self {
+        Self::from_string(reason)
+    }
+
+    /// Create an error from a message given as [`fmt::Arguments`], formatted by the
+    /// implementation, if at all, where it keeps it: no text is made for it beforehand.
+    ///
+    /// The default implementation makes arguments with nothing to format a fixed reason
+    /// ([`from_static`](Self::from_static)), and hands any other to
+    /// [`from_string`](Self::from_string).
+    fn from_args(args: fmt::Arguments<'_>) -> Self {
+        match args.as_str() {
+            Some(reason) => Self::from_static(reason),
+            None => Self::from_string(args),
+        }
+    }
 
     /// Returns `true` if a backtrace is available.
     ///

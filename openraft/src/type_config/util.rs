@@ -230,11 +230,19 @@ pub trait TypeConfigExt: RaftTypeConfig {
 
     // Error methods
 
-    /// Create an error source from a string message.
+    /// Create an error source from a fixed reason.
     ///
-    /// This is a convenience wrapper for [`ErrorSource::from_string`].
-    fn err_from_string(msg: impl ToString) -> ErrorSourceOf<Self> {
-        ErrorSourceOf::<Self>::from_string(msg)
+    /// This is a convenience wrapper for [`ErrorSource::from_static`]: no text is made for it.
+    fn err_from_string(reason: &'static str) -> ErrorSourceOf<Self> {
+        ErrorSourceOf::<Self>::from_static(reason)
+    }
+
+    /// Create an error source from a message given as [`fmt::Arguments`](std::fmt::Arguments).
+    ///
+    /// This is a convenience wrapper for [`ErrorSource::from_args`]: the arguments are formatted,
+    /// if at all, by the error source, where it keeps them, never into a `String` beforehand.
+    fn err_from_args(args: std::fmt::Arguments<'_>) -> ErrorSourceOf<Self> {
+        ErrorSourceOf::<Self>::from_args(args)
     }
 
     /// Create an error source from an error reference.

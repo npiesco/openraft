@@ -108,7 +108,7 @@ where
         // The stored log range is `(last_purged_log_id, last_log_id]`: an inversion means the
         // log store is corrupted, e.g., by a snapshot inconsistent with the local logs.
         if last_log_id < last_purged_log_id {
-            let err = C::err_from_string(format_args!(
+            let err = C::err_from_args(format_args!(
                 "inverted log order in log store: last_log_id({}) < last_purged_log_id({}); the log store is corrupted",
                 last_log_id.display(),
                 last_purged_log_id.display(),
@@ -134,7 +134,7 @@ where
 
             // If required logs are purged, it's an error - we can't recover
             if start < last_purged_log_id.next_index() {
-                let err = C::err_from_string(format_args!(
+                let err = C::err_from_args(format_args!(
                     "Cannot re-apply logs: need logs from index {}, but purged up to {}",
                     start,
                     last_purged_log_id.display()
@@ -161,7 +161,7 @@ where
             // the state machine and log store contain different entries in the same slot; a smaller
             // applied index leaves a conflicting log tail that purging cannot remove.
             if last_log_id.next_index() >= last_applied.next_index() {
-                let err = C::err_from_string(format_args!(
+                let err = C::err_from_args(format_args!(
                     "inverted log order: last_applied({}) in the state machine is greater than last_log_id({}) in the log store but not at a greater index; the store is corrupted",
                     last_applied.display(),
                     last_log_id.display(),
@@ -294,7 +294,7 @@ where
             let last = entries.last().map(|ent| ent.index());
 
             let make_err = || {
-                let err = C::err_from_string(format_args!(
+                let err = C::err_from_args(format_args!(
                     "Failed to get log entries, expected index: [{}, {}), got [{:?}, {:?})",
                     start, chunk_end, first, last
                 ));

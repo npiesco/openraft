@@ -1195,7 +1195,10 @@ where
         }
 
         let cmd = sm::Command::apply(first, last.clone(), responders, slots);
-        self.sm_handle.send(cmd).await.map_err(|e| StorageError::apply(last, C::err_from_string(e)))?;
+        self.sm_handle
+            .send(cmd)
+            .await
+            .map_err(|_e| StorageError::apply(last, C::err_from_string("cannot send to sm::Worker")))?;
 
         Ok(())
     }
