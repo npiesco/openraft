@@ -83,6 +83,8 @@ pub mod batch;
 pub mod bench_internals;
 #[cfg(test)]
 mod feature_serde_test;
+#[cfg(test)]
+pub(crate) mod metered;
 
 use std::fmt;
 
