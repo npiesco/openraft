@@ -5,6 +5,21 @@
 //! membership they track, before any of them is allocated, and credited back only once they are
 //! freed: the charge is held by the state it funds, declared after what it funds. A node
 //! [`run`](crate::Raft::run) without a funder charges nothing.
+//!
+//! # Tracing
+//!
+//! Tracing is not charged, and with it disabled nothing on an admitted path allocates for it: a
+//! disabled span or event, as the `tracing` macros make one when no subscriber enables its level
+//! and callsite, evaluates none of its fields and is no handle at all, and `#[instrument]` wraps
+//! an async fn's future in place, unboxed, and not at all if its span is disabled. Naming the
+//! enclosing function in a log line, `func_name!`, borrows its static name and allocates nothing
+//! either way. Enabled, what is allocated is the subscriber's: its record of each span it enables
+//! and of each callsite it first registers, and whatever it formats each field and event into;
+//! openraft's fields on admitted paths are borrowed `display`/`debug` wrappers, formatted only by
+//! the subscriber. So is the `log` crate's, if the `tracing-log` feature is on and a logger
+//! enables a level: then a span's fields are evaluated for the logger even with no subscriber.
+//! [`Wait`](crate::metrics::Wait), a diagnostic on no admitted path, formats its message into a
+//! `String` for its spans and events when they are enabled.
 
 use std::collections::TryReserveError;
 use std::collections::VecDeque;

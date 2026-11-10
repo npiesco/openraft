@@ -13,17 +13,15 @@
 // TODO: Enable this when doc is complete
 // #![warn(missing_docs)]
 
+/// The name of the enclosing function, closures and async blocks dropped, shown without
+/// allocating: a log line that names it allocates nothing to do so.
 macro_rules! func_name {
     () => {{
         fn f() {}
         fn type_name_of<T>(_: T) -> &'static str {
             std::any::type_name::<T>()
         }
-        let name = type_name_of(f);
-        let n = &name[..name.len() - 3];
-        let nn = n.replace("::{{closure}}", "");
-        nn
-        // nn.split("::").last().unwrap_or_default()
+        $crate::display_ext::DisplayFuncName::of_item(type_name_of(f))
     }};
 }
 
