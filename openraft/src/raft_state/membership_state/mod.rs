@@ -145,9 +145,7 @@ where
     ) -> Result<Membership<NID, N>, ChangeMembershipError<CLID, NID>> {
         self.ensure_committed()?;
 
-        let effective = self.effective();
-        let membership = effective.membership().clone();
-        let new_membership = membership.change(change, retain)?;
+        let new_membership = self.effective().membership().changed(change, retain)?;
         Ok(new_membership)
     }
 

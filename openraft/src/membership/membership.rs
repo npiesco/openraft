@@ -327,6 +327,15 @@ where
         Membership::plain(self.members().clone())
     }
 
+    /// The membership `change` derives from this one, as a leader derives the next membership it
+    /// proposes (`MembershipState::next_membership` takes this same path): so a caller that
+    /// funds the derivation before proposing measures what it takes here. An owned membership is
+    /// read through another handle on it, allocating nothing for it; one without an owner is
+    /// copied first. The membership returned has no owner.
+    pub fn changed(&self, change: ChangeMembers<NID, N>, retain: bool) -> Result<Self, MembershipError<NID>> {
+        self.clone().change(change, retain)
+    }
+
     /// Whether an owner accounts for this membership's memory ([`Self::with_owner`]).
     pub fn is_owned(&self) -> bool {
         matches!(self.repr, Repr::Owned(_))
