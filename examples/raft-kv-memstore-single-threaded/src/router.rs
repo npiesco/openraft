@@ -49,6 +49,7 @@ impl Router {
             Err(e) => match e {
                 RaftError::APIError(x) => Err(RPCError::RemoteError(RemoteError::new(to, x))),
                 RaftError::Fatal(f) => Err(RPCError::Unreachable(Unreachable::new(&f))),
+                RaftError::Unfunded(u) => Err(RPCError::Unreachable(Unreachable::new(&u))),
             },
         }
     }

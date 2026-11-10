@@ -42,3 +42,27 @@ where C: RaftTypeConfig
         self.map_err(RaftError::Fatal)
     }
 }
+
+/// A call that may also be refused for want of funding: its outer error is a [`RaftError`] with
+/// no API error, either [`Fatal`] or [`Unfunded`](crate::errors::Unfunded).
+impl<C, T, E> IntoRaftResult<C, T, E> for Result<Result<T, E>, RaftError<C>>
+where C: RaftTypeConfig
+{
+    fn into_raft_result(self) -> Result<T, RaftError<C, E>> {
+        match self {
+            Ok(Ok(t)) => Ok(t),
+            Ok(Err(e)) => Err(RaftError::APIError(e)),
+            Err(RaftError::APIError(never)) => match never {},
+            Err(RaftError::Fatal(f)) => Err(RaftError::Fatal(f)),
+            Err(RaftError::Unfunded(u)) => Err(RaftError::Unfunded(u)),
+        }
+    }
+}
+
+impl<C, T> IntoRaftResult<C, T, Infallible> for Result<T, RaftError<C>>
+where C: RaftTypeConfig
+{
+    fn into_raft_result(self) -> Result<T, RaftError<C>> {
+        self
+    }
+}

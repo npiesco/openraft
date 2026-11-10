@@ -138,7 +138,7 @@ where
                             RPCError::Unreachable(_) => {}
                             RPCError::Network(_) => {}
                             RPCError::RemoteError(remote_err) => match remote_err.source {
-                                RaftError::Fatal(_) => {}
+                                RaftError::Fatal(_) | RaftError::Unfunded(_) => {}
                                 RaftError::APIError(snapshot_err) => match snapshot_err {
                                     InstallSnapshotError::SnapshotMismatch(mismatch) => {
                                         tracing::warn!(

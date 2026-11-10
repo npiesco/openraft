@@ -89,6 +89,15 @@ where
 
         (responder, complete_rx)
     }
+
+    /// A responder with only a complete sender, `complete_tx`, made by the caller: one whose
+    /// channel is charged to the node's funder.
+    pub(crate) fn completing(complete_tx: OneshotSenderOf<C, T>) -> Self {
+        Self {
+            commit_tx: None,
+            complete_tx,
+        }
+    }
 }
 
 impl<C, T> Responder<C, T> for ProgressResponder<C, T>

@@ -32,6 +32,7 @@ use std::fmt::Debug;
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use core_state::CoreState;
@@ -77,6 +78,7 @@ use crate::RaftState;
 pub use crate::RaftTypeConfig;
 use crate::StorageError;
 use crate::StorageHelper;
+use crate::async_runtime::Funder;
 use crate::async_runtime::MpscWeakSender;
 use crate::async_runtime::OneshotSender;
 use crate::async_runtime::Select2;
@@ -696,6 +698,7 @@ where
             tx_shutdown: Mutex::new(Some(tx_shutdown)),
             core_state: Mutex::new(CoreState::Unstarted(Some(start))),
             extensions: Extensions::default(),
+            funder: OnceLock::new(),
         };
 
         Ok(Self {
@@ -710,11 +713,30 @@ where
     /// This method is idempotent: calling it on an already running or stopped node has no effect.
     #[since(version = "0.10.0")]
     pub fn run(&self) {
+        self.start(None);
+    }
+
+    /// [`run`](Self::run), with what the node allocates for its owner charged to `funder` before
+    /// it is made: the channel each call waits on for the core's answer. A call whose channel
+    /// `funder` refuses is answered with [`Unfunded`](crate::errors::Unfunded), nothing sent.
+    ///
+    /// Like [`run`](Self::run), it has no effect on a node already running or stopped: the node
+    /// keeps the funding it was started with.
+    #[since(version = "0.10.0")]
+    pub fn run_funded(&self, funder: Arc<dyn Funder>) {
+        self.start(Some(funder));
+    }
+
+    fn start(&self, funder: Option<Arc<dyn Funder>>) {
         let mut state = self.inner.core_state.lock().unwrap();
         let CoreState::Unstarted(start) = &mut *state else {
             return;
         };
 
+        if let Some(funder) = funder {
+            // Only a start sets it, and a node starts once.
+            let _ = self.inner.funder.set(funder);
+        }
         let start = start.take().expect("unstarted Raft must have a start function");
         let join_handle = start(self.inner.as_ref());
         *state = CoreState::Running(join_handle);
@@ -790,9 +812,13 @@ where
     /// Return a copy of the runtime statistics.
     ///
     /// Sends a message to RaftCore to retrieve the current runtime statistics.
-    /// This returns a snapshot of the stats at the time of the call.
+    /// This returns a snapshot of the stats at the time of the call, or [`Unfunded`] if the
+    /// node's funder refuses the channel it waits on.
+    ///
+    /// [`Unfunded`]: crate::errors::Unfunded
+    #[since(version = "0.10.0", change = "fails as `RaftError`, which may be `Unfunded`")]
     #[cfg(feature = "runtime-stats")]
-    pub async fn runtime_stats(&self) -> Result<RuntimeStats<C>, Fatal<C>> {
+    pub async fn runtime_stats(&self) -> Result<RuntimeStats<C>, RaftError<C>> {
         self.inner.call_core_oneshot(|tx| RaftMsg::GetRuntimeStats { tx }).await
     }
 

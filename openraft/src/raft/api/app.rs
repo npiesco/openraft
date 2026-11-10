@@ -9,6 +9,7 @@ use crate::core::raft_msg::RaftMsg;
 use crate::errors::ClientWriteError;
 use crate::errors::Fatal;
 use crate::errors::LinearizableReadError;
+use crate::errors::RaftError;
 use crate::impls::ProgressResponder;
 use crate::raft::ClientWriteResponse;
 use crate::raft::ClientWriteResult;
@@ -49,7 +50,7 @@ where C: RaftTypeConfig
     pub(crate) async fn get_read_linearizer(
         &self,
         linearizer_option: LinearizerOption,
-    ) -> Result<Result<Linearizer<C>, LinearizableReadError<C>>, Fatal<C>> {
+    ) -> Result<Result<Linearizer<C>, LinearizableReadError<C>>, RaftError<C>> {
         self.inner.call_core_oneshot(|tx| RaftMsg::GetLinearizer { linearizer_option, tx }).await
     }
 
@@ -59,8 +60,9 @@ where C: RaftTypeConfig
         &self,
         payload: PayloadOf<C>,
         // TODO: ClientWriteError can only be ForwardToLeader Error
-    ) -> Result<Result<ClientWriteResponse<C>, ClientWriteError<C>>, Fatal<C>> {
-        let (responder, complete_rx) = ProgressResponder::complete_only();
+    ) -> Result<Result<ClientWriteResponse<C>, ClientWriteError<C>>, RaftError<C>> {
+        let (complete_tx, complete_rx) = self.inner.oneshot()?;
+        let responder = ProgressResponder::completing(complete_tx);
 
         self.do_client_write_ff(
             Batch::of([payload]),

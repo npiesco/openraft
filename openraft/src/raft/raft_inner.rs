@@ -1,6 +1,7 @@
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use display_more::DisplayOptionExt;
@@ -11,7 +12,9 @@ use crate::Extensions;
 use crate::OptionalSend;
 use crate::RaftMetrics;
 use crate::RaftTypeConfig;
+use crate::async_runtime::Funder;
 use crate::async_runtime::MpscSender;
+use crate::async_runtime::Oneshot;
 use crate::async_runtime::watch::WatchReceiver;
 use crate::async_runtime::watch::WatchSender;
 use crate::config::RuntimeConfig;
@@ -20,6 +23,8 @@ use crate::core::io_flush_tracking::IoProgressWatcher;
 use crate::core::raft_msg::RaftMsg;
 use crate::core::raft_msg::external_command::ExternalCommand;
 use crate::errors::Fatal;
+use crate::errors::RaftError;
+use crate::errors::Unfunded;
 use crate::metrics::RaftDataMetrics;
 use crate::metrics::RaftServerMetrics;
 use crate::metrics::Wait;
@@ -28,6 +33,7 @@ use crate::type_config::AsyncRuntime;
 use crate::type_config::TypeConfigExt;
 use crate::type_config::alias::AsyncRuntimeOf;
 use crate::type_config::alias::MpscSenderOf;
+use crate::type_config::alias::OneshotOf;
 use crate::type_config::alias::OneshotReceiverOf;
 use crate::type_config::alias::OneshotSenderOf;
 use crate::type_config::alias::WatchReceiverOf;
@@ -62,6 +68,10 @@ where C: RaftTypeConfig
     ///
     /// External crates can access this via [`Raft::extensions()`](`crate::Raft::extensions`).
     pub(in crate::raft) extensions: Extensions,
+
+    /// What every channel a caller waits on is charged to before it is made, once the node is run
+    /// funded ([`Raft::run_funded()`](`crate::Raft::run_funded`)).
+    pub(in crate::raft) funder: OnceLock<Arc<dyn Funder>>,
 }
 
 impl<C> RaftInner<C>
@@ -110,14 +120,29 @@ where C: RaftTypeConfig
     /// The sender half is handed to `make_msg` and the matching receiver half is awaited here.
     /// Prefer this over [`Self::call_core`]: `RaftMsg` does not carry the response type, so
     /// `call_core` accepts any receiver, including one belonging to a different request.
+    ///
+    /// The channel is the caller's ([`Self::oneshot`]): refused as [`Unfunded`], nothing sent, if
+    /// the node's funder refuses it.
     #[tracing::instrument(level = "debug", skip_all)]
-    pub(crate) async fn call_core_oneshot<T, F>(&self, make_msg: F) -> Result<T, Fatal<C>>
+    pub(crate) async fn call_core_oneshot<T, F>(&self, make_msg: F) -> Result<T, RaftError<C>>
     where
         T: OptionalSend,
         F: FnOnce(OneshotSenderOf<C, T>) -> RaftMsg<C>,
     {
-        let (tx, rx) = C::oneshot();
-        self.call_core(make_msg(tx), rx).await
+        let (tx, rx) = self.oneshot()?;
+        Ok(self.call_core(make_msg(tx), rx).await?)
+    }
+
+    /// A oneshot channel a caller waits on for RaftCore's answer: on a node run funded, its block
+    /// charged to the node's funder before it is made, the charge held until both halves are
+    /// dropped and the block is freed; refused as [`Unfunded`], nothing allocated, if the funder
+    /// refuses it or the runtime cannot fund channels. A node run unfunded makes it uncharged.
+    pub(crate) fn oneshot<T>(&self) -> Result<(OneshotSenderOf<C, T>, OneshotReceiverOf<C, T>), Unfunded>
+    where T: OptionalSend {
+        match self.funder.get() {
+            Some(funder) => OneshotOf::<C>::funded_channel(funder).ok_or(Unfunded),
+            None => Ok(C::oneshot()),
+        }
     }
 
     /// Receive a message from RaftCore, return an error if the response is not delivered.

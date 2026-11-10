@@ -7,6 +7,8 @@
 
 // Re-export all public items from openraft-async-runtime
 pub use openraft_rt::AsyncRuntime;
+pub use openraft_rt::Charge;
+pub use openraft_rt::Funder;
 pub use openraft_rt::Instant;
 pub use openraft_rt::Mpsc;
 pub use openraft_rt::MpscReceiver;

@@ -15,8 +15,8 @@ use crate::core::raft_msg::membership_payloads::MembershipPayloads;
 use crate::core::replication_lag;
 use crate::entry::RaftPayload;
 use crate::errors::ClientWriteError;
-use crate::errors::Fatal;
 use crate::errors::InitializeError;
+use crate::errors::RaftError;
 use crate::impls::ProgressResponder;
 use crate::membership::IntoNodes;
 use crate::raft::ChangeMembershipOutcome;
@@ -24,7 +24,6 @@ use crate::raft::ChangeMembershipRequest;
 use crate::raft::ClientWriteResult;
 use crate::raft::Precondition;
 use crate::raft::raft_inner::RaftInner;
-use crate::type_config::TypeConfigExt;
 use crate::type_config::alias::BatchOf;
 use crate::type_config::alias::LogIdOf;
 
@@ -48,7 +47,7 @@ where C: RaftTypeConfig
 
     #[since(version = "0.10.0")]
     #[tracing::instrument(level = "debug", skip(self))]
-    pub(crate) async fn initialize<T>(&self, members: T) -> Result<Result<(), InitializeError<C>>, Fatal<C>>
+    pub(crate) async fn initialize<T>(&self, members: T) -> Result<Result<(), InitializeError<C>>, RaftError<C>>
     where T: IntoNodes<C::NodeId, C::Node> + Debug {
         self.initialize_with_payload(members, C::Payload::blank()).await
     }
@@ -59,7 +58,7 @@ where C: RaftTypeConfig
         &self,
         members: T,
         payload: C::Payload,
-    ) -> Result<Result<(), InitializeError<C>>, Fatal<C>>
+    ) -> Result<Result<(), InitializeError<C>>, RaftError<C>>
     where
         T: IntoNodes<C::NodeId, C::Node> + Debug,
     {
@@ -79,7 +78,7 @@ where C: RaftTypeConfig
         members: impl Into<ChangeMembers<C::NodeId, C::Node>>,
         retain: bool,
         preconditions: BatchOf<C, Precondition<C>>,
-    ) -> Result<ClientWriteResult<C>, Fatal<C>> {
+    ) -> Result<ClientWriteResult<C>, RaftError<C>> {
         let request = ChangeMembershipRequest::new(members, retain).with_preconditions(preconditions);
         let result = self.change_membership_with_payload(request).await?;
         let result = result.map(|outcome| outcome.uniform);
@@ -89,7 +88,7 @@ where C: RaftTypeConfig
     pub(crate) async fn change_membership_with_payload(
         &self,
         request: ChangeMembershipRequest<C>,
-    ) -> Result<Result<ChangeMembershipOutcome<C>, ClientWriteError<C>>, Fatal<C>> {
+    ) -> Result<Result<ChangeMembershipOutcome<C>, ClientWriteError<C>>, RaftError<C>> {
         let (changes, retain, preconditions, payload) = request.into_parts();
         let (joint_payload, uniform_payload) = match payload {
             Some((joint, uniform)) => (joint, uniform),
@@ -102,14 +101,19 @@ where C: RaftTypeConfig
             retain
         );
 
-        let (tx, rx) = ProgressResponder::<C, _>::complete_only();
+        // Every channel of both steps is the caller's, made before anything is sent: refused, the
+        // change is not proposed, and a joint entry never waits for a second step that could not
+        // be funded.
+        let (tx, rx) = self.inner.oneshot()?;
+        let tx = ProgressResponder::<C, _>::completing(tx);
+        let (uniform_tx, uniform_rx) = self.inner.oneshot()?;
 
         tracing::debug!("change_membership: start",);
 
         // `RaftCore` computes the membership, so only `RaftCore` can tell whether this change
         // needs a joint membership. It spends `joint_payload` on a joint membership and
         // `uniform_payload` on a uniform one, and returns the payload it did not spend.
-        let (unused_tx, unused_rx) = C::oneshot();
+        let (unused_tx, unused_rx) = self.inner.oneshot()?;
         let payloads = MembershipPayloads::JointOrUniform {
             joint: joint_payload,
             uniform: uniform_payload,
@@ -181,7 +185,7 @@ where C: RaftTypeConfig
             }]);
         let preconditions = Batch::of(preconditions);
 
-        let (tx, rx) = ProgressResponder::<C, _>::complete_only();
+        let tx = ProgressResponder::<C, _>::completing(uniform_tx);
 
         // The second step, send a NOOP change to flatten the joint config.
         let changes = ChangeMembers::AddVoterIds(Default::default());
@@ -195,7 +199,7 @@ where C: RaftTypeConfig
                     preconditions,
                     tx,
                 },
-                rx,
+                uniform_rx,
             )
             .await?;
 
@@ -222,7 +226,7 @@ where C: RaftTypeConfig
         membership: Membership<C::NodeId, C::Node>,
         payload: C::Payload,
         preconditions: BatchOf<C, Precondition<C>>,
-    ) -> Result<ClientWriteResult<C>, Fatal<C>> {
+    ) -> Result<ClientWriteResult<C>, RaftError<C>> {
         tracing::info!("append_membership: proposed membership: {}", membership);
 
         // Bind the membership into the payload here, so the core has exactly one value to
@@ -232,7 +236,8 @@ where C: RaftTypeConfig
             Err(refused) => return Ok(Err(ClientWriteError::ChangeMembershipError(refused.into()))),
         };
 
-        let (tx, rx) = ProgressResponder::<C, _>::complete_only();
+        let (tx, rx) = self.inner.oneshot()?;
+        let tx = ProgressResponder::<C, _>::completing(tx);
 
         let msg = RaftMsg::AppendMembership {
             payload,
@@ -240,7 +245,7 @@ where C: RaftTypeConfig
             tx,
         };
 
-        self.inner.call_core(msg, rx).await
+        Ok(self.inner.call_core(msg, rx).await?)
     }
 
     #[since(version = "0.10.0")]
@@ -250,8 +255,9 @@ where C: RaftTypeConfig
         id: C::NodeId,
         node: C::Node,
         blocking: bool,
-    ) -> Result<ClientWriteResult<C>, Fatal<C>> {
-        let (tx, rx) = ProgressResponder::<C, _>::complete_only();
+    ) -> Result<ClientWriteResult<C>, RaftError<C>> {
+        let (tx, rx) = self.inner.oneshot()?;
+        let tx = ProgressResponder::<C, _>::completing(tx);
 
         let msg = RaftMsg::ChangeMembership {
             changes: ChangeMembers::AddNodes(btreemap! {id.clone()=>node}),

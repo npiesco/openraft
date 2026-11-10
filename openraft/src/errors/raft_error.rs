@@ -8,13 +8,15 @@ use crate::StorageError;
 use crate::errors::Fatal;
 use crate::errors::ForwardToLeader;
 use crate::errors::Infallible;
+use crate::errors::Unfunded;
 use crate::try_as_ref::TryAsRef;
 
 /// Error returned by Raft API methods.
 ///
 /// `RaftError` wraps either a [`Fatal`] error indicating the Raft node has stopped (due to storage
-/// failure, panic, or shutdown), or an API-specific error `E` (such as [`ClientWriteError`] or
-/// [`LinearizableReadError`]).
+/// failure, panic, or shutdown), an API-specific error `E` (such as [`ClientWriteError`] or
+/// [`LinearizableReadError`]), or [`Unfunded`]: the node's funder refused what the call
+/// allocates, so it was not made.
 ///
 /// # Usage
 ///
@@ -48,6 +50,10 @@ where C: RaftTypeConfig
     #[cfg_attr(feature = "serde", serde(bound = ""))]
     #[error(transparent)]
     Fatal(#[from] Fatal<C>),
+
+    /// The node's funder refused what the call allocates, so it was not made; the node runs on.
+    #[error(transparent)]
+    Unfunded(#[from] Unfunded),
 }
 
 impl<C> RaftError<C, Infallible>
@@ -70,7 +76,7 @@ where
     pub fn api_error(&self) -> Option<&E> {
         match self {
             RaftError::APIError(e) => Some(e),
-            RaftError::Fatal(_) => None,
+            RaftError::Fatal(_) | RaftError::Unfunded(_) => None,
         }
     }
 
@@ -78,14 +84,14 @@ where
     pub fn into_api_error(self) -> Option<E> {
         match self {
             RaftError::APIError(e) => Some(e),
-            RaftError::Fatal(_) => None,
+            RaftError::Fatal(_) | RaftError::Unfunded(_) => None,
         }
     }
 
     /// Return a reference to Self::Fatal.
     pub fn fatal(&self) -> Option<&Fatal<C>> {
         match self {
-            RaftError::APIError(_) => None,
+            RaftError::APIError(_) | RaftError::Unfunded(_) => None,
             RaftError::Fatal(f) => Some(f),
         }
     }
@@ -93,7 +99,7 @@ where
     /// Try to convert self to Fatal error.
     pub fn into_fatal(self) -> Option<Fatal<C>> {
         match self {
-            RaftError::APIError(_) => None,
+            RaftError::APIError(_) | RaftError::Unfunded(_) => None,
             RaftError::Fatal(f) => Some(f),
         }
     }
@@ -103,7 +109,7 @@ where
     where E: TryAsRef<ForwardToLeader<C>> {
         match self {
             RaftError::APIError(api_err) => api_err.try_as_ref(),
-            RaftError::Fatal(_) => None,
+            RaftError::Fatal(_) | RaftError::Unfunded(_) => None,
         }
     }
 
@@ -112,7 +118,7 @@ where
     where E: TryInto<ForwardToLeader<C>> {
         match self {
             RaftError::APIError(api_err) => api_err.try_into().ok(),
-            RaftError::Fatal(_) => None,
+            RaftError::Fatal(_) | RaftError::Unfunded(_) => None,
         }
     }
 }
@@ -135,19 +141,20 @@ where C: RaftTypeConfig
     }
 }
 
-/// Peel off `Fatal`, leaving the API error `E` as the residual.
+/// Peel off `Fatal` and `Unfunded`, leaving the API error `E` as the residual.
 impl<C, E> Peel for RaftError<C, E>
 where
     C: RaftTypeConfig,
     E: Debug,
 {
-    type Peeled = Fatal<C>;
+    type Peeled = RaftError<C>;
     type Residual = E;
 
-    fn peel(self) -> Result<E, Fatal<C>> {
+    fn peel(self) -> Result<E, RaftError<C>> {
         match self {
             RaftError::APIError(e) => Ok(e),
-            RaftError::Fatal(f) => Err(f),
+            RaftError::Fatal(f) => Err(RaftError::Fatal(f)),
+            RaftError::Unfunded(u) => Err(RaftError::Unfunded(u)),
         }
     }
 }

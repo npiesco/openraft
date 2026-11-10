@@ -1,9 +1,11 @@
 //! Oneshot channel traits.
 
 use std::future::Future;
+use std::sync::Arc;
 
 use openraft_macros::since;
 
+use crate::Funder;
 use crate::OptionalSend;
 
 /// A oneshot channel for sending a single value between asynchronous tasks.
@@ -26,6 +28,17 @@ pub trait Oneshot {
     #[track_caller]
     fn channel<T>() -> (Self::Sender<T>, Self::Receiver<T>)
     where T: OptionalSend;
+
+    /// Creates a one-shot channel like [`channel`](Self::channel), its shared block charged to
+    /// `funder` before it is allocated, the charge held until both handles are dropped and the
+    /// block is freed.
+    ///
+    /// `None`, with nothing allocated, if `funder` refuses the block or the runtime cannot fund
+    /// its channels, which by default it cannot.
+    fn funded_channel<T>(_funder: &Arc<dyn Funder>) -> Option<(Self::Sender<T>, Self::Receiver<T>)>
+    where T: OptionalSend {
+        None
+    }
 }
 
 /// Send a value on a oneshot channel.

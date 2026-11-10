@@ -23,8 +23,8 @@ use crate::errors::into_ok::into_ok;
 ///   API errors (`E`) from fatal errors.
 ///
 /// - `Result<R, RPCError<C, RaftError<C, E>>>` decomposes into `Result<Result<R, E>, RPCError<C>>`,
-///   separating API errors from transport and fatal errors. Note: `RaftError::Fatal` is converted
-///   to `RPCError::Unreachable`.
+///   separating API errors from transport and fatal errors. Note: `RaftError::Fatal` and
+///   `RaftError::Unfunded` are converted to `RPCError::Unreachable`.
 ///
 /// # Example: Handling RaftError
 ///
@@ -59,6 +59,10 @@ use crate::errors::into_ok::into_ok;
 ///         Err(RaftError::Fatal(fatal)) => {
 ///             // Fatal: Raft node is shutting down or storage failed
 ///             Err(AppError::RaftStopped(fatal))
+///         }
+///         Err(RaftError::Unfunded(_)) => {
+///             // Recoverable: the node's funder had no room for the call, retry later
+///             Err(AppError::RetryLater)
 ///         }
 ///         Err(RaftError::APIError(_)) => {
 ///             // This branch is unreachable after decompose()
@@ -135,6 +139,7 @@ where C: RaftTypeConfig
             Err(e) => match e {
                 RaftError::APIError(e) => Ok(Err(e)),
                 RaftError::Fatal(e) => Err(RaftError::Fatal(e)),
+                RaftError::Unfunded(e) => Err(RaftError::Unfunded(e)),
             },
         }
     }
@@ -147,7 +152,7 @@ where
 {
     type InnerError = E;
 
-    /// `RaftError::Fatal` is considered as `RPCError::Unreachable`.
+    /// `RaftError::Fatal` and `RaftError::Unfunded` are considered as `RPCError::Unreachable`.
     fn decompose(self) -> Result<Result<R, E>, RPCError<C>> {
         match self {
             Ok(r) => Ok(Ok(r)),
@@ -158,6 +163,7 @@ where
                 RPCError::RemoteError(e) => match e.source {
                     RaftError::APIError(e) => Ok(Err(e)),
                     RaftError::Fatal(e) => Err(RPCError::Unreachable(Unreachable::new(&e))),
+                    RaftError::Unfunded(e) => Err(RPCError::Unreachable(Unreachable::new(&e))),
                 },
             },
         }

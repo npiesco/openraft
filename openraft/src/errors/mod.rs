@@ -25,6 +25,7 @@ pub(crate) mod storage_error;
 mod storage_io_result;
 mod streaming_error;
 mod uncommitted_leader_log;
+mod unfunded;
 mod unsupported_membership_transition;
 
 use std::collections::BTreeSet;
@@ -55,6 +56,7 @@ pub(crate) use self::replication_error::ReplicationError;
 pub(crate) use self::storage_io_result::StorageIOResult;
 pub use self::streaming_error::StreamingError;
 pub use self::uncommitted_leader_log::UncommittedLeaderLog;
+pub use self::unfunded::Unfunded;
 pub use self::unsupported_membership_transition::UnsupportedMembershipTransition;
 use crate::LogId;
 use crate::Membership;

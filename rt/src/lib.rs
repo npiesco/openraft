@@ -10,6 +10,7 @@
 //! - [`Mpsc`], [`MpscSender`], [`MpscReceiver`] - Bounded MPSC channels
 //! - [`Mutex`] - Async mutex
 //! - [`Oneshot`], [`OneshotSender`] - One-shot channels
+//! - [`Funder`], [`Charge`] - Funding for what a node allocates for its owner
 //! - [`Watch`], [`WatchSender`], [`WatchReceiver`] - Watch channels
 //!
 //! ## Features
@@ -20,6 +21,7 @@ mod async_runtime;
 #[macro_use]
 pub mod task_local;
 pub mod deterministic_rng;
+pub mod funding;
 pub mod instant;
 pub mod mpsc;
 pub mod mutex;
@@ -31,6 +33,8 @@ pub mod testing;
 pub mod watch;
 
 pub use async_runtime::AsyncRuntime;
+pub use funding::Charge;
+pub use funding::Funder;
 pub use instant::Instant;
 pub use mpsc::Mpsc;
 pub use mpsc::MpscReceiver;

@@ -14,6 +14,7 @@ use crate::core::raft_msg::RaftMsg;
 use crate::core::raft_msg::install_full_snapshot_request::InstallFullSnapshotRequest;
 use crate::core::sm;
 use crate::errors::Fatal;
+use crate::errors::RaftError;
 #[cfg(doc)]
 use crate::errors::into_raft_result::IntoRaftResult;
 use crate::raft::AppendEntriesRequest;
@@ -41,7 +42,9 @@ use crate::vote::raft_vote::RaftVoteExt;
 /// Usage: [`Raft::protocol_api()`](crate::raft::Raft::protocol_api)
 ///
 /// This API uses a nested `Result<Result<_,E>,Fatal>` pattern to separate different error types:
-/// - The outer `Result` contains [`Fatal`] errors that indicate the Raft node itself has failed
+/// - The outer `Result` contains [`Fatal`] errors that indicate the Raft node itself has failed; a
+///   call whose channel the node's funder charges has a [`RaftError`] there instead, which is
+///   either [`Fatal`] or [`Unfunded`](crate::errors::Unfunded): the funder refused the call
 /// - The inner `Result` contains application-specific errors that should be handled or forwarded
 ///
 /// This separation allows application code to handle fatal errors (typically by terminating or
@@ -120,14 +123,14 @@ where
 
     #[since(version = "0.10.0")]
     #[tracing::instrument(level = "debug", skip(self, rpc))]
-    pub(crate) async fn vote(&self, rpc: VoteRequest<C>) -> Result<VoteResponse<C>, Fatal<C>> {
+    pub(crate) async fn vote(&self, rpc: VoteRequest<C>) -> Result<VoteResponse<C>, RaftError<C>> {
         tracing::info!("Raft::vote(): rpc: {}", rpc);
 
         self.inner.call_core_oneshot(|tx| RaftMsg::RequestVote { rpc, tx }).await
     }
 
     #[tracing::instrument(level = "debug", skip(self, rpc))]
-    pub(crate) async fn pre_vote(&self, rpc: VoteRequest<C>) -> Result<VoteResponse<C>, Fatal<C>> {
+    pub(crate) async fn pre_vote(&self, rpc: VoteRequest<C>) -> Result<VoteResponse<C>, RaftError<C>> {
         tracing::info!("Raft::pre_vote(): rpc: {}", rpc);
 
         self.inner.call_core_oneshot(|tx| RaftMsg::RequestPreVote { rpc, tx }).await
@@ -138,7 +141,7 @@ where
     pub(crate) async fn append_entries(
         &self,
         rpc: AppendEntriesRequest<C>,
-    ) -> Result<AppendEntriesResponse<C>, Fatal<C>> {
+    ) -> Result<AppendEntriesResponse<C>, RaftError<C>> {
         tracing::debug!("Raft::append_entries: rpc: {}", rpc);
 
         let stream_result: StreamAppendResult<C> =
