@@ -26,6 +26,7 @@ mod storage_io_result;
 mod streaming_error;
 mod uncommitted_leader_log;
 mod unfunded;
+mod unfunded_write;
 mod unsupported_membership_transition;
 
 use std::collections::BTreeSet;
@@ -57,6 +58,7 @@ pub(crate) use self::storage_io_result::StorageIOResult;
 pub use self::streaming_error::StreamingError;
 pub use self::uncommitted_leader_log::UncommittedLeaderLog;
 pub use self::unfunded::Unfunded;
+pub use self::unfunded_write::UnfundedWrite;
 pub use self::unsupported_membership_transition::UnsupportedMembershipTransition;
 use crate::LogId;
 use crate::Membership;
@@ -100,6 +102,7 @@ pub enum InstallSnapshotError {}
 /// An error related to a client write request.
 #[since(version = "0.10.0", change = "added `LogEntryDiscarded`")]
 #[since(version = "0.10.0", change = "added `Unfunded`")]
+#[since(version = "0.10.0", change = "`Unfunded` names the bytes refused")]
 #[derive(Debug, Clone, thiserror::Error, derive_more::TryInto)]
 #[derive(PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize), serde(bound = ""))]
@@ -132,10 +135,10 @@ where C: RaftTypeConfig
     PreconditionFailed(#[from] PreconditionFailed<C>),
 
     /// The node's funder refused what the write's responder takes while it waits, so nothing of
-    /// the write was appended; it can be retried once the funder has room.
+    /// the write was appended; it can be retried once the funder has the room it names.
     #[since(version = "0.10.0")]
     #[error(transparent)]
-    Unfunded(Unfunded),
+    Unfunded(UnfundedWrite),
 }
 
 impl<C> TryAsRef<ForwardToLeader<C>> for ClientWriteError<C>

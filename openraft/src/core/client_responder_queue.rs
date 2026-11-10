@@ -4,7 +4,7 @@
 use std::collections::VecDeque;
 
 use crate::async_runtime::Charge;
-use crate::errors::Unfunded;
+use crate::errors::UnfundedWrite;
 use crate::proposer::funding;
 use crate::proposer::funding::Funding;
 
@@ -50,10 +50,11 @@ impl<T> ClientResponderQueue<T> {
         }
     }
 
-    /// Room for `count` more responders, charged to `funding` before any of it is allocated:
-    /// the queue's buffer grown to hold them, at least doubled, and their slots in the vector
-    /// they are drained into. Refused, nothing is charged and nothing allocated.
-    pub(crate) fn reserve(&mut self, count: usize, funding: &Funding) -> Result<(), Unfunded> {
+    /// Room for `count` more responders, charged to `funding` in one charge before any of it is
+    /// allocated: the queue's buffer grown to hold them, at least doubled, and their slots in the
+    /// vector they are drained into. Refused, nothing is charged and nothing allocated, and the
+    /// refusal names exactly the bytes asked for.
+    pub(crate) fn reserve(&mut self, count: usize, funding: &Funding) -> Result<(), UnfundedWrite> {
         if count == 0 {
             return Ok(());
         }
@@ -62,9 +63,10 @@ impl<T> ClientResponderQueue<T> {
         let capacity = self.responders.capacity();
         let grown = if need > capacity { need.max(2 * capacity) } else { 0 };
 
-        let slots = funding.charge(count * Self::SLOT)?;
+        let bytes = (count + grown) * Self::SLOT;
+        let mut slots = funding.charge(bytes).map_err(|_| UnfundedWrite::new(bytes))?;
         if grown > 0 {
-            let buffer = funding.charge(grown * Self::SLOT)?;
+            let buffer = slots.as_mut().and_then(|slots| slots.split(grown * Self::SLOT));
             // The old buffer stays charged until the grown one replaced it and it was freed.
             self.responders.reserve_exact(grown - len);
             self.buffer = buffer;
@@ -265,7 +267,11 @@ mod tests {
         let mut queue = TestQueue::new();
 
         // Two responders need 2 slots and a buffer of 2: a slot more than the limit allows.
-        assert_eq!(queue.reserve(2, &limit.funding()), Err(Unfunded));
+        assert_eq!(
+            queue.reserve(2, &limit.funding()),
+            Err(UnfundedWrite::new(4 * slot)),
+            "refused, exactly what was asked for is named"
+        );
         assert_eq!(limit.held(), 0, "refused, nothing is charged");
         assert_eq!(queue.responders.capacity(), 0, "and nothing is allocated");
     }
