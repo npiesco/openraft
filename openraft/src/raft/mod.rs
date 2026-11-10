@@ -890,7 +890,8 @@ where
     ///
     /// Returns [`Leader`] containing the leader ID and health metadata if this node is the leader
     /// (i.e., its vote has been accepted by a quorum), otherwise returns
-    /// [`ForwardToLeader`] error containing the current known leader information.
+    /// [`ForwardToLeader`] error containing the current known leader information. On a node run
+    /// funded, the error names the leader by id only, and its node is not copied.
     ///
     /// # Example
     ///
@@ -928,7 +929,12 @@ where
                 last_quorum_acked: metrics.last_quorum_acked.map(|s| s.into_inner()),
             })
         } else {
-            let node = metrics.membership_config.membership().get_node(node_id).cloned();
+            // A funded node names the leader by id only: a copy of its node would own heap no
+            // charge was taken for.
+            let node = match self.inner.funder.get() {
+                Some(_) => None,
+                None => metrics.membership_config.membership().get_node(node_id).cloned(),
+            };
 
             Err(ForwardToLeader {
                 leader_id: Some(node_id.clone()),

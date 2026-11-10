@@ -459,6 +459,9 @@ where C: RaftTypeConfig
     /// The node ID of the current leader, if known.
     pub leader_id: Option<C::NodeId>,
     /// The node information of the current leader, if known.
+    ///
+    /// A node run funded leaves it `None`: copying the node would allocate heap no charge was
+    /// taken for, so the leader is named by `leader_id` only.
     pub leader_node: Option<C::Node>,
     /// Why the request must be forwarded or retried.
     ///

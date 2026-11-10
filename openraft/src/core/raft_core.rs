@@ -640,7 +640,7 @@ where
 
         // If the leader is transferring leadership, forward requests to the new leader.
         if let Some(to) = lh.leader.get_transfer_to() {
-            let forward = lh.state.new_forward_to_leader(to.clone());
+            let forward = lh.state.new_forward_to_leader(to.clone(), &lh.config.funding);
             return Err(forward.with_reason(ForwardReason::LeadershipTransfer));
         }
 
@@ -1083,7 +1083,7 @@ where
     }
 
     fn fail_pending_reads(&mut self) {
-        let forward = self.engine.state.forward_to_leader();
+        let forward = self.engine.state.forward_to_leader(&self.engine.config.funding);
         let err = LinearizableReadError::ForwardToLeader(forward);
         self.pending_reads.drain_all_with_error(err);
         self.reschedule_pending_read_check();
@@ -1134,8 +1134,13 @@ where
         leading.and_then(|l| l.last_quorum_acked_time())
     }
 
+    /// The node of `leader_id`, if it is a member. A funded node names the leader by id only,
+    /// and copies no node: the copy would own heap no charge was taken for.
     pub(crate) fn get_leader_node(&self, leader_id: Option<C::NodeId>) -> Option<C::Node> {
         let leader_id = leader_id?;
+        if self.engine.config.funding.is_funded() {
+            return None;
+        }
 
         self.engine.state.membership_state.effective().get_node(&leader_id).cloned()
     }
@@ -1902,7 +1907,7 @@ where
 
                     if committed_leader_id.as_ref() != Some(&expected) {
                         // Leader has changed, return ForwardToLeader error to all responders
-                        let forward_err = self.engine.state.forward_to_leader();
+                        let forward_err = self.engine.state.forward_to_leader(&self.engine.config.funding);
                         for r in responders.into_iter().flatten() {
                             let err = ClientWriteError::ForwardToLeader(forward_err.clone());
                             r.on_complete(Err(err));

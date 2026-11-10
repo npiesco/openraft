@@ -1080,7 +1080,7 @@ where
         let leader = match self.leader.as_mut() {
             None => {
                 tracing::debug!("not a leader, server_state: {:?}", self.state.server_state);
-                return Err(self.state.forward_to_leader());
+                return Err(self.state.forward_to_leader(&self.config.funding));
             }
             Some(x) => x,
         };

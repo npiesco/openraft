@@ -9,8 +9,10 @@ use crate::RaftTypeConfig;
 use crate::ServerState;
 use crate::async_runtime::Charge;
 use crate::engine::LogIdList;
+use crate::errors::ForwardReason;
 use crate::errors::ForwardToLeader;
 use crate::log_id::raft_log_id::RaftLogId;
+use crate::proposer::funding::Funding;
 use crate::type_config::alias::CommittedLeaderIdOf;
 use crate::type_config::alias::RefLogIdOf;
 use crate::type_config::alias::SnapshotMetaOf;
@@ -481,28 +483,43 @@ where C: RaftTypeConfig
     }
 
     /// Build a ForwardToLeader error that contains the leader id and node it knows.
-    pub(crate) fn forward_to_leader(&self) -> ForwardToLeader<C> {
+    ///
+    /// A funded node names the leader by id only, see [`new_forward_to_leader`].
+    ///
+    /// [`new_forward_to_leader`]: Self::new_forward_to_leader
+    pub(crate) fn forward_to_leader(&self, funding: &Funding) -> ForwardToLeader<C> {
         let vote = self.vote_ref();
 
         if vote.is_committed() {
             let id = vote.to_leader_id().node_id().clone();
 
-            return self.new_forward_to_leader(id);
+            return self.new_forward_to_leader(id, funding);
         }
 
         ForwardToLeader::empty()
     }
 
-    pub(crate) fn new_forward_to_leader(&self, to: C::NodeId) -> ForwardToLeader<C> {
+    /// A ForwardToLeader error naming `to`, if it is a member, and the node it is.
+    ///
+    /// A funded node names `to` by id only: a copy of its node owns heap of the node type's,
+    /// which openraft can neither size nor charge before making it, so none is made, and the
+    /// caller finds the node in the membership it holds.
+    pub(crate) fn new_forward_to_leader(&self, to: C::NodeId, funding: &Funding) -> ForwardToLeader<C> {
         // leader may not step down after being removed from `voters`.
         // It does not have to be a voter, being in membership is just enough
         let node = self.membership_state.effective().get_node(&to);
 
-        if let Some(n) = node {
-            ForwardToLeader::new(to, n.clone())
-        } else {
-            tracing::debug!("id={} is not in membership, when getting leader id", to);
-            ForwardToLeader::empty()
+        match node {
+            Some(_) if funding.is_funded() => ForwardToLeader {
+                leader_id: Some(to),
+                leader_node: None,
+                reason: ForwardReason::NotLeader,
+            },
+            Some(n) => ForwardToLeader::new(to, n.clone()),
+            None => {
+                tracing::debug!("id={} is not in membership, when getting leader id", to);
+                ForwardToLeader::empty()
+            }
         }
     }
 
