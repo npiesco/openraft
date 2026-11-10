@@ -318,6 +318,13 @@ where
         }
     }
 
+    /// A copy of its members that shares nothing with it and has no owner: a fresh allocation
+    /// of each, as a clone of a membership with no owner makes, for a caller that funds the copy
+    /// apart and gives it an owner of its own ([`Self::with_owner`]).
+    pub fn copy_unowned(&self) -> Self {
+        Membership::plain(self.members().clone())
+    }
+
     /// Whether an owner accounts for this membership's memory ([`Self::with_owner`]).
     pub fn is_owned(&self) -> bool {
         matches!(self.repr, Repr::Owned(_))
@@ -699,6 +706,38 @@ mod tests {
     use crate::errors::LearnerNotFound;
     use crate::errors::MembershipError;
     use crate::type_config::alias::ChangeMembershipErrorOf;
+
+    /// An owned membership's clones share its members and its owner is released once, after the
+    /// last of them; an unowned copy equals it and shares nothing with it.
+    #[test]
+    fn test_membership_owner_released_after_last_clone() {
+        use std::sync::Arc;
+        use std::sync::atomic::AtomicUsize;
+        use std::sync::atomic::Ordering;
+
+        struct Counted(Arc<AtomicUsize>);
+        impl crate::MembershipOwner for Counted {
+            fn release(self: Box<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let released = Arc::new(AtomicUsize::new(0));
+        let plain = Membership::<u64, ()>::new_unchecked(vec![btreeset! {1,2}], btreemap! {1=>(),2=>()});
+        let owned = plain.clone().with_owner(Box::new(Counted(released.clone())));
+        assert!(owned.is_owned());
+        assert_eq!(owned, plain);
+
+        let shared = owned.clone();
+        let copy = owned.copy_unowned();
+        assert!(!copy.is_owned());
+        assert_eq!(copy, plain);
+
+        drop(owned);
+        assert_eq!(released.load(Ordering::SeqCst), 0);
+        drop(shared);
+        assert_eq!(released.load(Ordering::SeqCst), 1);
+    }
 
     #[test]
     fn test_membership_ensure_voter_nodes() -> anyhow::Result<()> {
