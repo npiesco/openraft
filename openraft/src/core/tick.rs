@@ -360,7 +360,7 @@ mod tests {
             // A first wait far longer than this test's own timeout: the loop can only finish by
             // observing the shutdown signal.
             let (_enable_tx, enabled) = TickUTConfig::watch_channel(true);
-            let th = Tick::<TickUTConfig>::spawn(Duration::from_secs(10), tx, enabled);
+            let th = Tick::<TickUTConfig>::spawn(Duration::from_secs(10), tx, enabled, TickUTConfig::oneshot());
 
             TickUTConfig::sleep(Duration::from_millis(50)).await;
             let join_handle = th.shutdown().unwrap();
@@ -388,7 +388,7 @@ mod tests {
         run_seeded(SEED, async {
             let (tx, mut rx) = SeededTickConfig::mpsc(1024);
             let (_enable_tx, enabled) = SeededTickConfig::watch_channel(true);
-            let th = Tick::<SeededTickConfig>::spawn(period, tx, enabled);
+            let th = Tick::<SeededTickConfig>::spawn(period, tx, enabled, SeededTickConfig::oneshot());
 
             let early_first =
                 SeededTickConfig::timeout(first_wait - margin, recv_tick::<SeededTickConfig>(&mut rx)).await;
@@ -427,7 +427,7 @@ mod tests {
             // until this task drains it, and the tick loop is held past its own schedule.
             let (tx, mut rx) = TickUTConfig::mpsc(1);
             let (_enable_tx, enabled) = TickUTConfig::watch_channel(true);
-            let th = Tick::<TickUTConfig>::spawn(PERIOD, tx, enabled);
+            let th = Tick::<TickUTConfig>::spawn(PERIOD, tx, enabled, TickUTConfig::oneshot());
 
             TickUTConfig::sleep(STALL).await;
 
@@ -454,7 +454,7 @@ mod tests {
             // Capacity one throttles the busy loop to this task's receive rate.
             let (tx, mut rx) = TickUTConfig::mpsc(1);
             let (_enable_tx, enabled) = TickUTConfig::watch_channel(true);
-            let th = Tick::<TickUTConfig>::spawn(Duration::ZERO, tx, enabled);
+            let th = Tick::<TickUTConfig>::spawn(Duration::ZERO, tx, enabled, TickUTConfig::oneshot());
 
             for expected in 1..=3 {
                 let i = TickUTConfig::timeout(Duration::from_secs(1), recv_tick::<TickUTConfig>(&mut rx))
@@ -489,7 +489,7 @@ mod tests {
             // loop sleeps through the deadlines at `first_wait + 3 * PERIOD` and `+ 4 * PERIOD`.
             let (tx, mut rx) = SeededTickConfig::mpsc(1);
             let (_enable_tx, enabled) = SeededTickConfig::watch_channel(true);
-            let th = Tick::<SeededTickConfig>::spawn(PERIOD, tx, enabled);
+            let th = Tick::<SeededTickConfig>::spawn(PERIOD, tx, enabled, SeededTickConfig::oneshot());
 
             SeededTickConfig::sleep(first_wait + STALL).await;
 
@@ -666,7 +666,7 @@ mod tests {
             // one blocked in `send()`. Receiving more than that proves the loop is running.
             let (tx, mut rx) = TickUTConfig::mpsc(1);
             let (switch, enabled) = TickUTConfig::watch_channel(true);
-            let th = Tick::<TickUTConfig>::spawn(PERIOD, tx, enabled);
+            let th = Tick::<TickUTConfig>::spawn(PERIOD, tx, enabled, TickUTConfig::oneshot());
 
             recv_tick::<TickUTConfig>(&mut rx).await;
             let start = std::time::Instant::now();
