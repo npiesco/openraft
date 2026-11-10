@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::future::Future;
 use std::sync::Arc;
 
 use openraft_macros::since;
@@ -7,8 +8,10 @@ use tracing::Level;
 use tracing::Span;
 
 use crate::Config;
+use crate::OptionalSend;
 use crate::RaftNetworkFactory;
 use crate::RaftTypeConfig;
+use crate::async_runtime::AsyncRuntime;
 use crate::async_runtime::Charge;
 use crate::async_runtime::Oneshot;
 use crate::async_runtime::watch::Watch;
@@ -18,14 +21,17 @@ use crate::core::heartbeat::worker::HeartbeatWorker;
 use crate::core::notification::Notification;
 use crate::engine::TargetProgress;
 use crate::errors::Unfunded;
+use crate::network::NetStreamAppend;
 use crate::progress::stream_id::StreamId;
 use crate::proposer::funding::Funding;
 use crate::proposer::funding::TaskCharge;
 use crate::proposer::funding::tree_bytes;
+use crate::type_config::alias::AsyncRuntimeOf;
 use crate::type_config::alias::CommittedVoteOf;
 use crate::type_config::alias::JoinHandleOf;
 use crate::type_config::alias::MpscSenderOf;
 use crate::type_config::alias::OneshotOf;
+use crate::type_config::alias::OneshotReceiverOf;
 use crate::type_config::alias::OneshotSenderOf;
 use crate::type_config::alias::WatchOf;
 use crate::type_config::alias::WatchSenderOf;
@@ -56,6 +62,60 @@ where C: RaftTypeConfig
 #[since(version = "0.10.0")]
 pub const fn heartbeat_map_bytes<C: RaftTypeConfig>(members: usize) -> usize {
     tree_bytes::<C::NodeId, WorkerHandle<C>>(members)
+}
+
+/// The bytes a Leader charges for each heartbeat worker it runs for another member, sending
+/// through clients of `NF`, before any of the worker is made: its task, everything the runtime
+/// allocates for it, and the channels that stop it and send it heartbeats, each held until it is
+/// freed. The client is not among them: it funds its own allocations. A node run with a funder
+/// holds two workers charged at once per other member while it rebuilds its workers, as a
+/// replaced worker's task may still run until it sees it is stopped.
+///
+/// `None` if the runtime cannot fund its tasks or channels now, as
+/// [`AsyncRuntime::spawn_bytes`](crate::async_runtime::AsyncRuntime::spawn_bytes) tells: a funded
+/// Leader runs no heartbeat worker then.
+#[since(version = "0.10.0")]
+pub fn heartbeat_worker_bytes<C, NF>() -> Option<usize>
+where
+    C: RaftTypeConfig,
+    NF: RaftNetworkFactory<C>,
+{
+    worker_task_bytes(worker_task::<C, NF::Network>)?.checked_add(worker_parts_bytes::<C>()?)
+}
+
+/// The future a heartbeat worker's task runs: the worker's loop until `rx_shutdown`, in `span`.
+fn worker_task<C, N>(
+    worker: HeartbeatWorker<C, N>,
+    rx_shutdown: OneshotReceiverOf<C, ()>,
+    span: Span,
+) -> impl Future<Output = ()>
+where
+    C: RaftTypeConfig,
+    N: NetStreamAppend<C>,
+{
+    worker.run(rx_shutdown).instrument(span)
+}
+
+/// What the runtime charges a task running the future `task` makes, as
+/// [`TaskCharge::take`] asks it.
+fn worker_task_bytes<C, N, T>(
+    _task: impl FnOnce(HeartbeatWorker<C, N>, OneshotReceiverOf<C, ()>, Span) -> T,
+) -> Option<usize>
+where
+    C: RaftTypeConfig,
+    N: NetStreamAppend<C>,
+    T: Future + OptionalSend + 'static,
+    T::Output: OptionalSend + 'static,
+{
+    AsyncRuntimeOf::<C>::spawn_bytes::<T>()
+}
+
+/// The blocks of the channels a heartbeat worker holds: the one that stops it and the one it is
+/// sent heartbeats on.
+fn worker_parts_bytes<C: RaftTypeConfig>() -> Option<usize> {
+    let stop = OneshotOf::<C>::block_bytes::<()>()?;
+    let events = WatchOf::<C>::block_bytes::<Option<HeartbeatEvent<C>>>()?;
+    stop.checked_add(events)
 }
 
 pub(crate) struct HeartbeatWorkersHandle<C>
@@ -228,11 +288,7 @@ where C: RaftTypeConfig
     where
         NF: RaftNetworkFactory<C>,
     {
-        let mut task = match TaskCharge::<C, _>::take(funding, || {
-            let stop = OneshotOf::<C>::block_bytes::<()>()?;
-            let events = WatchOf::<C>::block_bytes::<Option<HeartbeatEvent<C>>>()?;
-            stop.checked_add(events)
-        }) {
+        let mut task = match TaskCharge::<C, _>::take(funding, worker_parts_bytes::<C>) {
             Ok(task) => task,
             Err(Unfunded) => {
                 tracing::warn!("id={} target={}: no HeartbeatWorker: it is unfunded", id, prog.target);
@@ -259,7 +315,7 @@ where C: RaftTypeConfig
             tx_notification: tx_notification.clone(),
         };
 
-        let worker_handle = task.spawn(worker.run(rx_shutdown).instrument(span)).ok()?;
+        let worker_handle = task.spawn(worker_task(worker, rx_shutdown, span)).ok()?;
 
         Some(WorkerHandle {
             event_tx: tx,
