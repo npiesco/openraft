@@ -1227,9 +1227,15 @@ where
             return None;
         };
 
+        let funding = &self.engine.config.funding;
         let factory = &self.network_factory;
-        let parts = || stream_parts_bytes::<C, NF, LS>()?.checked_add(factory.new_client_bytes(target, node)?);
-        let mut task = match TaskCharge::<C, _>::take(&self.engine.config.funding, parts) {
+        let (backoff, network_backoff) = Self::client_backoff(funding, factory, target, node);
+        let parts = || {
+            stream_parts_bytes::<C, NF, LS>()?
+                .checked_add(factory.new_client_bytes(target, node)?)?
+                .checked_add(backoff)
+        };
+        let mut task = match TaskCharge::<C, _>::take(funding, parts) {
             Ok(task) => task,
             Err(Unfunded) => {
                 tracing::warn!(
@@ -1250,7 +1256,8 @@ where
         let network = self.network_factory.new_client(target.clone(), node).await;
 
         let event_watcher = self.new_event_watcher(replicate_rx);
-        let replication_context = self.new_replication_context(leader_vote, target, stream_id, cancel_rx);
+        let replication_context =
+            self.new_replication_context(leader_vote, target, stream_id, cancel_rx, network_backoff);
 
         let progress = replication_progress::ReplicationProgress {
             local_committed: self.engine.state.local_committed().cloned(),
@@ -1289,14 +1296,29 @@ where
         ))
     }
 
+    /// What a replication task to `target` at `node` is charged for the backoff its client gives,
+    /// and whether it asks its client for one: on a node run with a funder, only if the factory
+    /// tells what one allocates ([`RaftNetworkFactory::backoff_bytes`]), charged with the client;
+    /// if not, it backs off by the config's policy, which allocates nothing.
+    fn client_backoff(funding: &Funding, factory: &NF, target: &C::NodeId, node: &C::Node) -> (usize, bool) {
+        if !funding.is_funded() {
+            return (0, true);
+        }
+        match factory.backoff_bytes(target, node) {
+            Some(bytes) => (bytes, true),
+            None => (0, false),
+        }
+    }
+
     /// The context of a replication task to `target` for `leader_vote`, of the stream `stream_id`,
-    /// stopped by `cancel_rx`.
+    /// stopped by `cancel_rx`, asking its client for a backoff if `network_backoff`.
     fn new_replication_context(
         &self,
         leader_vote: CommittedVoteOf<C>,
         target: &C::NodeId,
         stream_id: StreamId,
         cancel_rx: WatchReceiverOf<C, ()>,
+        network_backoff: bool,
     ) -> ReplicationContext<C> {
         ReplicationContext {
             id: self.id.clone(),
@@ -1307,6 +1329,7 @@ where
             tx_notify: self.tx_notification.clone(),
             cancel_rx,
             replicate_batch: self.shared_replicate_batch.clone(),
+            network_backoff,
         }
     }
 
@@ -2744,9 +2767,15 @@ where
 
         // The channel that cancels it, the one sleep at a time it waits out its backoff on, and
         // what the client it sends with allocates.
+        let funding = &self.engine.config.funding;
         let factory = &self.network_factory;
-        let parts = || snapshot_transmitter_parts_bytes::<C>()?.checked_add(factory.new_client_bytes(&target, node)?);
-        let mut task = match TaskCharge::<C, _>::take(&self.engine.config.funding, parts) {
+        let (backoff, network_backoff) = Self::client_backoff(funding, factory, &target, node);
+        let parts = || {
+            snapshot_transmitter_parts_bytes::<C>()?
+                .checked_add(factory.new_client_bytes(&target, node)?)?
+                .checked_add(backoff)
+        };
+        let mut task = match TaskCharge::<C, _>::take(funding, parts) {
             Ok(task) => task,
             Err(Unfunded) => {
                 tracing::warn!(
@@ -2768,7 +2797,8 @@ where
         let snapshot_network = self.network_factory.new_snapshot_client(target.clone(), node).await;
 
         let snapshot_reader = self.sm_handle.new_snapshot_reader(self.engine.config.funding.clone());
-        let replication_task_context = self.new_replication_context(leader_vote, &target, stream_id, cancel_rx);
+        let replication_task_context =
+            self.new_replication_context(leader_vote, &target, stream_id, cancel_rx, network_backoff);
 
         let transmitter = SnapshotTransmitter::<C, NF, SM>::new(
             replication_task_context,

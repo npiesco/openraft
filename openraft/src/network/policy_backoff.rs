@@ -1,6 +1,6 @@
 //! The backoff a [`Config::backoff`] policy describes, read from the policy where the config holds
-//! it: unlike [`Config::build_backoff`], which parses the policy into new strings and vectors, it
-//! allocates nothing.
+//! it, as [`Config::build_backoff`] builds it: unlike the policy's parser, which parses the policy
+//! into new strings and vectors, it allocates nothing.
 //!
 //! It yields what `backoff_series::BackoffSeries::parse(policy)?.build()` yields: the durations
 //! of the series, then those its extrapolation gives, each capped at the policy's max.
@@ -324,5 +324,18 @@ mod tests {
 
         assert!(sum > std::time::Duration::ZERO);
         assert_eq!(0, meter.allocated, "a policy's backoff allocates nothing");
+    }
+
+    /// `Config::build_backoff` reads the policy where the config holds it, as it yields what the
+    /// parser builds: made and run, it allocates nothing.
+    #[test]
+    fn test_build_backoff_allocates_nothing() {
+        let config = config("100ms 200ms 400ms .. 3s");
+        let want = BackoffSeries::parse(&config.backoff).unwrap().build().take(40).collect::<Vec<_>>();
+
+        let (sum, meter) = metered(|| config.build_backoff().take(40).sum::<std::time::Duration>());
+
+        assert_eq!(want.into_iter().sum::<std::time::Duration>(), sum);
+        assert_eq!(0, meter.allocated, "the config's backoff allocates nothing");
     }
 }

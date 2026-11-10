@@ -20,24 +20,29 @@ enum Inner {
 }
 
 impl Backoff {
-    /// Create a new Backoff from an iterator of durations.
+    /// Create a new Backoff from an iterator of durations, boxed: it allocates
+    /// [`new_bytes::<I>()`](Self::new_bytes), and whatever the iterator allocates.
     pub fn new(iter: impl Iterator<Item = Duration> + OptionalSend + 'static) -> Self {
         Self {
             inner: Inner::Boxed(Box::new(iter)),
         }
     }
 
-    /// The backoff of `config`'s [`backoff`](Config::backoff) policy, as
-    /// [`Config::build_backoff`] builds it, made without allocating: the policy is read where
-    /// `config` holds it. Built by [`Config::build_backoff`], which panics, if the policy is
-    /// invalid, as only a config never validated holds.
-    pub(crate) fn of_policy(config: &Arc<Config>) -> Self {
-        match PolicyBackoff::new(config) {
-            Some(policy) => Self {
-                inner: Inner::Policy(policy),
-            },
-            None => config.build_backoff(),
-        }
+    /// The bytes [`Backoff::new`] allocates for an iterator `I`: the box it puts it in, nothing
+    /// for an iterator of no size.
+    pub const fn new_bytes<I>() -> usize
+    where I: Iterator<Item = Duration> + OptionalSend + 'static {
+        size_of::<I>()
+    }
+
+    /// The backoff of `config`'s [`backoff`](Config::backoff) policy, made without allocating:
+    /// the policy is read where `config` holds it. `None` if the policy is invalid, as only a
+    /// config never validated holds.
+    pub(crate) fn of_policy(config: &Arc<Config>) -> Option<Self> {
+        let policy = PolicyBackoff::new(config)?;
+        Some(Self {
+            inner: Inner::Policy(policy),
+        })
     }
 }
 

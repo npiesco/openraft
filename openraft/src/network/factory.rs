@@ -59,6 +59,22 @@ where C: RaftTypeConfig
         None
     }
 
+    /// The most bytes a [`Backoff`](crate::network::Backoff) given by
+    /// [`backoff()`](crate::network::NetBackoff::backoff) of a client to `target` at `node`
+    /// allocates, the box [`Backoff::new`](crate::network::Backoff::new) puts it in
+    /// ([`Backoff::new_bytes`](crate::network::Backoff::new_bytes)) and what its iterator holds.
+    /// A replication stream or snapshot transmitter holds one such backoff at a time.
+    ///
+    /// A node [`run`](crate::Raft::run) with a funder charges these bytes with the client, before
+    /// it is made, and holds them as long as the client. `None`, the default, tells that the
+    /// factory cannot say: a funded node then does not ask the client for a backoff, and backs off
+    /// by [`Config::build_backoff`](crate::Config::build_backoff), which allocates nothing.
+    #[since(version = "0.10.0")]
+    fn backoff_bytes(&self, target: &C::NodeId, node: &C::Node) -> Option<usize> {
+        let _ = (target, node);
+        None
+    }
+
     /// Create a network client dedicated to sending heartbeat RPCs to the target node.
     ///
     /// This client carries the Leader's liveness probes: the periodic heartbeat that maintains the

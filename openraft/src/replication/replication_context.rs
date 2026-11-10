@@ -7,6 +7,8 @@ use crate::StorageError;
 use crate::async_runtime::MpscSender;
 use crate::core::SharedReplicateBatch;
 use crate::core::notification::Notification;
+use crate::network::Backoff;
+use crate::network::NetBackoff;
 use crate::progress::inflight_id::InflightId;
 use crate::progress::stream_id::StreamId;
 use crate::proposer::SendStamp;
@@ -55,6 +57,24 @@ where C: RaftTypeConfig
 
     /// Shared histogram for recording replication batch sizes.
     pub(crate) replicate_batch: SharedReplicateBatch,
+
+    /// Whether the network client is asked for its own backoff: on a node run with a funder,
+    /// only if its factory told what one allocates
+    /// ([`RaftNetworkFactory::backoff_bytes`](crate::RaftNetworkFactory::backoff_bytes)), and it
+    /// was charged with the client.
+    pub(crate) network_backoff: bool,
+}
+
+/// The backoff to wait out after `network` failed: the one it gives, if `ask`, as
+/// [`ReplicationContext::network_backoff`] tells, else, or if it gives none, that of `config`'s
+/// policy, which allocates nothing.
+pub(crate) fn backoff_of<C, N>(network: &N, ask: bool, config: &Arc<Config>) -> Backoff
+where
+    C: RaftTypeConfig,
+    N: NetBackoff<C> + ?Sized,
+{
+    let given = if ask { network.backoff() } else { None };
+    given.unwrap_or_else(|| config.build_backoff())
 }
 
 impl<C> ReplicationContext<C>
@@ -148,5 +168,47 @@ where C: RaftTypeConfig
             .field("session_id", &self.stream_id)
             .field("config", &self.config)
             .finish_non_exhaustive()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::iter::Repeat;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use super::backoff_of;
+    use crate::Config;
+    use crate::engine::testing::UTConfig;
+    use crate::metered::metered;
+    use crate::network::Backoff;
+    use crate::network::NetBackoff;
+
+    /// A network that gives its own backoff, boxed.
+    struct Giving;
+
+    impl NetBackoff<UTConfig> for Giving {
+        fn backoff(&self) -> Option<Backoff> {
+            Some(Backoff::new(std::iter::repeat(Duration::from_secs(7))))
+        }
+    }
+
+    /// Asked, the network's backoff is taken, allocating what `Backoff::new_bytes` tells, as its
+    /// factory charges it; not asked, as a funded node whose factory cannot tell, the network is
+    /// not asked and the config's policy is read in place, allocating nothing.
+    #[test]
+    fn test_network_backoff_only_if_asked() {
+        let config = Arc::new(Config {
+            backoff: "100ms 200ms".to_string(),
+            ..Default::default()
+        });
+
+        let (first, meter) = metered(|| backoff_of::<UTConfig, _>(&Giving, true, &config).next());
+        assert_eq!(Some(Duration::from_secs(7)), first);
+        assert_eq!(Backoff::new_bytes::<Repeat<Duration>>(), meter.allocated);
+
+        let (first, meter) = metered(|| backoff_of::<UTConfig, _>(&Giving, false, &config).next());
+        assert_eq!(Some(Duration::from_millis(100)), first);
+        assert_eq!(0, meter.allocated, "the policy's backoff allocates nothing");
     }
 }

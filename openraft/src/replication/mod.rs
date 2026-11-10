@@ -49,7 +49,6 @@ use crate::errors::RPCError;
 use crate::errors::ReplicationClosed;
 use crate::log_id_range::LogIdRange;
 use crate::network::Backoff;
-use crate::network::NetBackoff;
 use crate::network::NetStreamAppend;
 use crate::network::RPCOption;
 use crate::progress::inflight_id::InflightId;
@@ -66,6 +65,7 @@ use crate::replication::event_watcher::EventWatcher;
 use crate::replication::inflight_append_queue::InflightAppendQueue;
 use crate::replication::replicate::Replicate;
 use crate::replication::replication_context::ReplicationContext;
+use crate::replication::replication_context::backoff_of;
 use crate::replication::stream_context::StreamContext;
 use crate::storage::RaftLogStorage;
 use crate::type_config::TypeConfigExt;
@@ -301,10 +301,11 @@ where
 
             // Kept separate from `on_error` because only this scope holds a reference
             // to `network`, which is needed to construct the `Backoff` iterator.
-            // If the network returns None, fall back to the policy configured in `Config::backoff`,
-            // read in place, which allocates nothing.
+            // If the network is not asked, or returns None, fall back to the policy configured in
+            // `Config::backoff`, read in place, which allocates nothing.
             let config = self.replication_context.config.clone();
-            self.reconcile_backoff(|| network.backoff().unwrap_or_else(|| Backoff::of_policy(&config))).await;
+            let ask = self.replication_context.network_backoff;
+            self.reconcile_backoff(|| backoff_of::<C, _>(&network, ask, &config)).await;
 
             let payload = self.select_next_payload().await?;
 

@@ -124,6 +124,7 @@ fn probe_stops_after_storage_limited_prefix() {
                         tx_notify,
                         cancel_rx,
                         replicate_batch: SharedReplicateBatch::new(),
+                        network_backoff: true,
                     },
                     event_watcher: EventWatcher {
                         replicate_rx,

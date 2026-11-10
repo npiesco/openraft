@@ -15,7 +15,6 @@ use crate::errors::RPCError;
 use crate::errors::ReplicationClosed;
 use crate::errors::ReplicationError;
 use crate::network::Backoff;
-use crate::network::NetBackoff;
 use crate::network::NetSnapshot;
 use crate::network::RPCOption;
 use crate::progress::inflight_id::InflightId;
@@ -23,6 +22,7 @@ use crate::proposer::funding::sleep_bytes;
 use crate::proposer::funding::task_bytes;
 use crate::replication::EXHAUSTED_BACKOFF_DELAY;
 use crate::replication::replication_context::ReplicationContext;
+use crate::replication::replication_context::backoff_of;
 use crate::replication::response::ReplicationResult;
 use crate::storage::RaftStateMachine;
 use crate::type_config::TypeConfigExt;
@@ -193,11 +193,12 @@ where
                     };
 
                     if start_backoff && self.backoff.is_none() {
-                        self.backoff = Some(
-                            self.network
-                                .backoff()
-                                .unwrap_or_else(|| Backoff::of_policy(&self.replication_context.config)),
-                        );
+                        let context = &self.replication_context;
+                        self.backoff = Some(backoff_of::<C, _>(
+                            &self.network,
+                            context.network_backoff,
+                            &context.config,
+                        ));
                     }
 
                     if let Some(b) = &mut self.backoff {

@@ -1,6 +1,7 @@
 //! Raft runtime configuration.
 
 use std::ops::Deref;
+use std::sync::Arc;
 use std::time::Duration;
 
 use backoff_series::BackoffSeries;
@@ -818,13 +819,13 @@ impl Config {
         Ok(self)
     }
 
-    /// Build a [`Backoff`] iterator from the [`backoff`](Self::backoff) policy string.
+    /// Build a [`Backoff`] iterator from the [`backoff`](Self::backoff) policy string, without
+    /// allocating: the backoff shares the config, and reads the policy where it holds it.
     ///
     /// Panics if the policy is invalid — callers should obtain `Config` through [`Config::build`]
     /// or [`Config::validate`], which reject invalid policies up-front.
     #[since(version = "0.10.0")]
-    pub fn build_backoff(&self) -> Backoff {
-        let series = BackoffSeries::parse(&self.backoff).expect("backoff policy must be validated by Config::validate");
-        Backoff::new(series.build())
+    pub fn build_backoff(self: &Arc<Self>) -> Backoff {
+        Backoff::of_policy(self).expect("backoff policy must be validated by Config::validate")
     }
 }

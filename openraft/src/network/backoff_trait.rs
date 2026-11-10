@@ -31,6 +31,11 @@ where C: RaftTypeConfig
     ///
     /// Return `None` to use the default backoff configured in
     /// [`Config::backoff`](crate::Config::backoff).
+    ///
+    /// A node [`run`](crate::Raft::run) with a funder asks for it only if the factory that made
+    /// this client tells what it allocates
+    /// ([`RaftNetworkFactory::backoff_bytes`](crate::RaftNetworkFactory::backoff_bytes)), charged
+    /// with the client; else it uses the configured one, which allocates nothing.
     #[since(
         version = "0.10.0",
         change = "changed return type to Option<Backoff>; None delegates to Config::backoff"
