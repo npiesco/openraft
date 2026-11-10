@@ -14,6 +14,7 @@ use crate::core::heartbeat::worker::HeartbeatWorker;
 use crate::core::notification::Notification;
 use crate::engine::TargetProgress;
 use crate::progress::stream_id::StreamId;
+use crate::proposer::funding::Funding;
 use crate::type_config::TypeConfigExt;
 use crate::type_config::alias::CommittedVoteOf;
 use crate::type_config::alias::JoinHandleOf;
@@ -64,7 +65,10 @@ where C: RaftTypeConfig
     pub(crate) fn broadcast(&self, events: impl IntoIterator<Item = (C::NodeId, HeartbeatEvent<C>)>) {
         for (target, event) in events {
             tracing::debug!("id={} target={} send_heartbeat {}", self.id, target, event);
-            self.workers.get(&target).unwrap().event_tx.send(Some(event)).ok();
+            // A target whose worker's stop channel was refused has no worker to send to.
+            if let Some(worker) = self.workers.get(&target) {
+                worker.event_tx.send(Some(event)).ok();
+            }
         }
     }
 
@@ -79,6 +83,7 @@ where C: RaftTypeConfig
         tx_notification: &MpscSenderOf<C, Notification<C>>,
         progresses: impl IntoIterator<Item = &TargetProgress<C>>,
         close_old: bool,
+        funding: &Funding,
     ) where
         NF: RaftNetworkFactory<C>,
     {
@@ -94,6 +99,18 @@ where C: RaftTypeConfig
             let handle = if let Some(handle) = handle {
                 handle
             } else {
+                // The channel that stops the worker, its block charged before it is made and
+                // anything else of the worker is: refused, the target is left without a worker,
+                // nothing made for it.
+                let Ok((tx_shutdown, rx_shutdown)) = funding.oneshot::<C, ()>() else {
+                    tracing::warn!(
+                        "id={} target={}: no HeartbeatWorker: its stop channel is unfunded",
+                        self.id,
+                        prog.target
+                    );
+                    continue;
+                };
+
                 let network = network_factory.new_heartbeat_client(prog.target.clone(), &prog.target_node).await;
 
                 let (tx, rx) = C::watch_channel(None);
@@ -111,8 +128,6 @@ where C: RaftTypeConfig
                 };
 
                 let span = tracing::span!(parent: &Span::current(), Level::DEBUG, "heartbeat", id=display(&self.id), target=display(&prog.target));
-
-                let (tx_shutdown, rx_shutdown) = C::oneshot();
 
                 let worker_handle = C::spawn(worker.run(rx_shutdown).instrument(span));
 

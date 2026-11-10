@@ -7,21 +7,28 @@
 //! [`run`](crate::Raft::run) without a funder charges nothing.
 
 use std::fmt;
+use std::marker::PhantomData;
 use std::sync::Arc;
 
 use openraft_macros::since;
 
 use crate::Membership;
+use crate::OptionalSend;
 use crate::RaftTypeConfig;
 use crate::async_runtime::Charge;
 use crate::async_runtime::Funder;
+use crate::async_runtime::Oneshot;
 use crate::errors::Unfunded;
 use crate::node::Node;
 use crate::node::NodeId;
 use crate::progress::IdVal;
 use crate::progress::entry::ProgressEntry;
 use crate::proposer::SendStamp;
+use crate::type_config::TypeConfigExt;
 use crate::type_config::alias::InstantOf;
+use crate::type_config::alias::OneshotOf;
+use crate::type_config::alias::OneshotReceiverOf;
+use crate::type_config::alias::OneshotSenderOf;
 
 /// The funder a node's proposer state is charged to, if the node was run with one.
 #[derive(Clone, Default)]
@@ -44,6 +51,17 @@ impl Funding {
     /// Whether the node has a funder its allocations are charged to.
     pub(crate) fn is_funded(&self) -> bool {
         self.0.is_some()
+    }
+
+    /// A oneshot channel carrying `T`, its block charged before it is made and held until both
+    /// halves are dropped and the block is freed: refused as [`Unfunded`], nothing allocated, as
+    /// [`OneshotCharge::take`] is.
+    pub(crate) fn oneshot<C, T>(&self) -> Result<(OneshotSenderOf<C, T>, OneshotReceiverOf<C, T>), Unfunded>
+    where
+        C: RaftTypeConfig,
+        T: OptionalSend,
+    {
+        OneshotCharge::<C, T>::take(self.0.as_ref(), 1)?.channel()
     }
 }
 
@@ -74,6 +92,52 @@ impl Eq for Funding {}
 impl fmt::Debug for Funding {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_tuple("Funding").field(&self.0.is_some()).finish()
+    }
+}
+
+/// The charge, taken from a node's funder before any of them is made, for oneshot channels
+/// carrying `T` that are yet to be made; for none, uncharged, on a node run unfunded. Dropped,
+/// what it still holds is credited back.
+pub(crate) struct OneshotCharge<C, T> {
+    /// The charge, and the bytes of each channel's block it funds.
+    charge: Option<(Charge, usize)>,
+    _channel: PhantomData<fn() -> (C, T)>,
+}
+
+impl<C, T> OneshotCharge<C, T>
+where
+    C: RaftTypeConfig,
+    T: OptionalSend,
+{
+    /// The blocks of `count` channels charged to `funder`, all of them before any is made: refused
+    /// as [`Unfunded`], nothing charged, if `funder` refuses them or the runtime cannot fund
+    /// channels. Without a funder, nothing is charged and the channels are made uncharged.
+    pub(crate) fn take(funder: Option<&Arc<dyn Funder>>, count: usize) -> Result<Self, Unfunded> {
+        let charge = match funder {
+            Some(funder) => {
+                let block = OneshotOf::<C>::block_bytes::<T>().ok_or(Unfunded)?;
+                let bytes = block.checked_mul(count).ok_or(Unfunded)?;
+                Some((Charge::take(funder, bytes).ok_or(Unfunded)?, block))
+            }
+            None => None,
+        };
+        Ok(Self {
+            charge,
+            _channel: PhantomData,
+        })
+    }
+
+    /// One of the channels it was taken for, its block funded by its share of the charge, held
+    /// until both halves are dropped and the block is freed; refused as [`Unfunded`], nothing
+    /// allocated, once every channel it was taken for is made.
+    pub(crate) fn channel(&mut self) -> Result<(OneshotSenderOf<C, T>, OneshotReceiverOf<C, T>), Unfunded> {
+        match &mut self.charge {
+            Some((charge, block)) => {
+                let block = charge.split(*block).ok_or(Unfunded)?;
+                OneshotOf::<C>::charged_channel(block).map_err(|_| Unfunded)
+            }
+            None => Ok(C::oneshot()),
+        }
     }
 }
 

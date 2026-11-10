@@ -5,8 +5,8 @@ use crate::async_runtime::MpscSender;
 use crate::async_runtime::MpscWeakSender;
 use crate::async_runtime::SendError;
 use crate::core::sm;
+use crate::proposer::funding::Funding;
 use crate::storage::RaftStateMachine;
-use crate::type_config::TypeConfigExt;
 use crate::type_config::alias::JoinHandleOf;
 use crate::type_config::alias::MpscSenderOf;
 use crate::type_config::alias::MpscWeakSenderOf;
@@ -34,10 +34,12 @@ where
         self.cmd_tx.send(cmd).await
     }
 
-    /// Create a [`SnapshotReader`] to get the current snapshot from the state machine.
-    pub(crate) fn new_snapshot_reader(&self) -> SnapshotReader<C, SM> {
+    /// Create a [`SnapshotReader`] to get the current snapshot from the state machine, the
+    /// channel it waits on for the snapshot charged to `funding`.
+    pub(crate) fn new_snapshot_reader(&self, funding: Funding) -> SnapshotReader<C, SM> {
         SnapshotReader {
             cmd_tx: self.cmd_tx.downgrade(),
+            funding,
         }
     }
 }
@@ -54,6 +56,9 @@ where
     ///
     /// [`Worker`]: sm::worker::Worker
     cmd_tx: MpscWeakSenderOf<C, sm::Command<C, SM>>,
+
+    /// What the channel each read waits on is charged to before it is made.
+    funding: Funding,
 }
 
 impl<C, SM> SnapshotReader<C, SM>
@@ -63,10 +68,14 @@ where
 {
     /// Get a snapshot from the state machine.
     ///
-    /// If the state machine worker has shutdown, it will return an error.
+    /// If the state machine worker has shutdown, or the channel the read waits on is refused its
+    /// charge (nothing made), it will return an error.
     /// If there is no snapshot available, it will return `Ok(None)`.
     pub(crate) async fn get_snapshot(&self) -> Result<Option<SmSnapshotOf<C, SM>>, &'static str> {
-        let (tx, rx) = C::oneshot();
+        let Ok((tx, rx)) = self.funding.oneshot::<C, _>() else {
+            tracing::warn!("the channel to read the snapshot on is unfunded");
+            return Err("the channel to read the snapshot on is unfunded");
+        };
 
         let cmd = sm::Command::get_snapshot(tx);
         tracing::debug!("SnapshotReader sending command to sm::Worker: {:?}", cmd);

@@ -37,6 +37,7 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use core_state::CoreState;
+use core_state::StopChannels;
 use derive_more::Display;
 use futures_util::FutureExt;
 use linearizable_read::Linearizer;
@@ -140,6 +141,7 @@ use crate::metrics::Wait;
 use crate::metrics::WaitError;
 use crate::network::NetSnapshot;
 use crate::proposer::funding::Funding;
+use crate::proposer::funding::OneshotCharge;
 use crate::raft::raft_inner::RaftInner;
 use crate::raft::responder::ProgressResponder;
 pub use crate::raft::runtime_config_handle::RuntimeConfigHandle;
@@ -561,7 +563,6 @@ where
         let weak_tx_notify = tx_notify.downgrade();
 
         let (tx_progress, progress_watcher) = IoProgressWatcher::new();
-        let (tx_shutdown, rx_shutdown) = C::oneshot();
 
         let runtime_config = Arc::new(RuntimeConfig::new(&config));
 
@@ -604,96 +605,100 @@ where
             let rx_metrics = rx_metrics.clone();
             let rx_server_metrics = rx_server_metrics.clone();
 
-            Box::new(move |inner: &RaftInner<C>| {
-                let mut engine = engine;
-                engine.config.funding = Funding::new(inner.funder.get().cloned());
+            Box::new(
+                move |inner: &RaftInner<C>,
+                      core_stop: OneshotReceiverOf<C, ()>,
+                      tick_stop: (OneshotSenderOf<C, ()>, OneshotReceiverOf<C, ()>)| {
+                    let mut engine = engine;
+                    engine.config.funding = Funding::new(inner.funder.get().cloned());
 
-                let tick_tx = tx_notify.clone();
-                let sm_handle = worker::Worker::spawn(
-                    id.clone(),
-                    state_machine,
-                    log_reader,
-                    tx_notify.clone(),
-                    (sm_cmd_tx, sm_cmd_rx),
-                    sm_span,
-                );
+                    let tick_tx = tx_notify.clone();
+                    let sm_handle = worker::Worker::spawn(
+                        id.clone(),
+                        state_machine,
+                        log_reader,
+                        tx_notify.clone(),
+                        (sm_cmd_tx, sm_cmd_rx),
+                        sm_span,
+                    );
 
-                let core: RaftCore<C, N, LS, SM> = RaftCore {
-                    id: id.clone(),
-                    config: config.clone(),
-                    runtime_config: runtime_config.clone(),
-                    core_state: Default::default(),
-                    network_factory: Arc::new(C::mutex(network)),
-                    log_store,
-                    sm_handle,
+                    let core: RaftCore<C, N, LS, SM> = RaftCore {
+                        id: id.clone(),
+                        config: config.clone(),
+                        runtime_config: runtime_config.clone(),
+                        core_state: Default::default(),
+                        network_factory: Arc::new(C::mutex(network)),
+                        log_store,
+                        sm_handle,
 
-                    engine,
+                        engine,
 
-                    // Grown as writes reserve room for their responders, each growth charged.
-                    client_responders: ClientResponderQueue::new(),
+                        // Grown as writes reserve room for their responders, each growth charged.
+                        client_responders: ClientResponderQueue::new(),
 
-                    pending_reads: PendingReadQueue::default(),
-                    pending_read_deadline_notifier: PendingReadDeadlineNotifier::spawn(tx_notify.clone()),
-                    replications: Default::default(),
+                        pending_reads: PendingReadQueue::default(),
+                        pending_read_deadline_notifier: PendingReadDeadlineNotifier::spawn(tx_notify.clone()),
+                        replications: Default::default(),
 
-                    heartbeat_handle: HeartbeatWorkersHandle::new(id.clone(), config.clone()),
-                    tx_api: tx_api.clone(),
-                    rx_api: BatchRaftMsgReceiver::new(
-                        rx_api,
-                        config.api_batch_capacity,
-                        Duration::from_millis(config.api_batch_linger_ms),
-                    ),
-                    tx_install_snapshot: tx_install_snapshot.clone(),
-                    rx_install_snapshot,
+                        heartbeat_handle: HeartbeatWorkersHandle::new(id.clone(), config.clone()),
+                        tx_api: tx_api.clone(),
+                        rx_api: BatchRaftMsgReceiver::new(
+                            rx_api,
+                            config.api_batch_capacity,
+                            Duration::from_millis(config.api_batch_linger_ms),
+                        ),
+                        tx_install_snapshot: tx_install_snapshot.clone(),
+                        rx_install_snapshot,
 
-                    tx_notification: tx_notify,
-                    rx_notification: rx_notify.peekable(),
+                        tx_notification: tx_notify,
+                        rx_notification: rx_notify.peekable(),
 
-                    io_broadcast: IoBroadcast {
-                        completed: tx_io_completed,
-                        accepted: io_accepted_tx,
-                        submitted: io_submitted_tx,
-                        committed: committed_tx,
-                    },
+                        io_broadcast: IoBroadcast {
+                            completed: tx_io_completed,
+                            accepted: io_accepted_tx,
+                            submitted: io_submitted_tx,
+                            committed: committed_tx,
+                        },
 
-                    metrics: MetricsChannels {
-                        all: tx_metrics,
-                        data: tx_data_metrics,
-                        server: tx_server_metrics,
-                        progress: tx_progress,
-                    },
+                        metrics: MetricsChannels {
+                            all: tx_metrics,
+                            data: tx_data_metrics,
+                            server: tx_server_metrics,
+                            progress: tx_progress,
+                        },
 
-                    runtime_stats: RuntimeStats::new(&config),
-                    shared_replicate_batch,
+                        runtime_stats: RuntimeStats::new(&config),
+                        shared_replicate_batch,
 
-                    metrics_recorder: None,
+                        metrics_recorder: None,
 
-                    span: core_span,
-                };
+                        span: core_span,
+                    };
 
-                // Spawn forwarder task to bridge Watch channel to notification channel
-                let _forwarder_handle = C::spawn(io_completion_forwarder::<C>(rx_io_completed, weak_tx_notify));
+                    // Spawn forwarder task to bridge Watch channel to notification channel
+                    let _forwarder_handle = C::spawn(io_completion_forwarder::<C>(rx_io_completed, weak_tx_notify));
 
-                StepDownWatcher::<C>::spawn(
-                    rx_server_metrics.clone(),
-                    rx_metrics.clone(),
-                    tx_api.downgrade(),
-                    &config,
-                );
+                    StepDownWatcher::<C>::spawn(
+                        rx_server_metrics.clone(),
+                        rx_metrics.clone(),
+                        tx_api.downgrade(),
+                        &config,
+                    );
 
-                let core = Box::new(core);
-                let core_fut = core.main(rx_shutdown).instrument(trace_span!("spawn").or_current());
-                let join_handle = C::spawn(core_fut);
+                    let core = Box::new(core);
+                    let core_fut = core.main(core_stop).instrument(trace_span!("spawn").or_current());
+                    let join_handle = C::spawn(core_fut);
 
-                let tick_period = Duration::from_millis(config.tick_interval());
-                let enabled = {
-                    let enable_tick = inner.runtime_config.enable_tick.lock().unwrap();
-                    enable_tick.subscribe()
-                };
-                let tick_handle = Tick::spawn(tick_period, tick_tx, enabled);
-                *inner.tick_handle.lock().unwrap() = Some(tick_handle);
-                join_handle
-            })
+                    let tick_period = Duration::from_millis(config.tick_interval());
+                    let enabled = {
+                        let enable_tick = inner.runtime_config.enable_tick.lock().unwrap();
+                        enable_tick.subscribe()
+                    };
+                    let tick_handle = Tick::spawn(tick_period, tick_tx, enabled, tick_stop);
+                    *inner.tick_handle.lock().unwrap() = Some(tick_handle);
+                    join_handle
+                },
+            )
         };
 
         let inner = RaftInner {
@@ -706,7 +711,7 @@ where
             rx_data_metrics,
             rx_server_metrics,
             progress_watcher,
-            tx_shutdown: Mutex::new(Some(tx_shutdown)),
+            tx_shutdown: Mutex::new(None),
             core_state: Mutex::new(CoreState::Unstarted(Some(start))),
             extensions: Extensions::default(),
             funder: OnceLock::new(),
@@ -724,7 +729,11 @@ where
     /// This method is idempotent: calling it on an already running or stopped node has no effect.
     #[since(version = "0.10.0")]
     pub fn run(&self) {
-        self.start(None);
+        let started: Result<(), std::convert::Infallible> = self.start(None, |_| {
+            let (core_tx, core_rx) = C::oneshot();
+            Ok((core_tx, core_rx, C::oneshot()))
+        });
+        let Ok(()) = started;
     }
 
     /// [`run`](Self::run), with what the node allocates for its owner charged to `funder` before
@@ -738,26 +747,45 @@ where
     ///
     /// [`ChangeMembershipError::MembershipRefused`]: crate::errors::ChangeMembershipError::MembershipRefused
     ///
+    /// The channels that stop the core and its tick are charged to `funder` too, both before
+    /// either is made: refused as [`Unfunded`], nothing made and the node left unstarted, if
+    /// `funder` refuses them.
+    ///
     /// Like [`run`](Self::run), it has no effect on a node already running or stopped: the node
     /// keeps the funding it was started with.
     #[since(version = "0.10.0")]
-    pub fn run_funded(&self, funder: Arc<dyn Funder>) {
-        self.start(Some(funder));
+    pub fn run_funded(&self, funder: Arc<dyn Funder>) -> Result<(), Unfunded> {
+        self.start(Some(funder), |funder| {
+            let mut stops = OneshotCharge::<C, ()>::take(funder, 2)?;
+            let (core_tx, core_rx) = stops.channel()?;
+            Ok((core_tx, core_rx, stops.channel()?))
+        })
     }
 
-    fn start(&self, funder: Option<Arc<dyn Funder>>) {
+    /// Start the core with the channels that stop it and its tick, made by `stops` for the
+    /// funder the node is run with, unless the node already started; refused as `stops` is,
+    /// nothing started.
+    fn start<E>(
+        &self,
+        funder: Option<Arc<dyn Funder>>,
+        stops: impl FnOnce(Option<&Arc<dyn Funder>>) -> Result<StopChannels<C>, E>,
+    ) -> Result<(), E> {
         let mut state = self.inner.core_state.lock().unwrap();
         let CoreState::Unstarted(start) = &mut *state else {
-            return;
+            return Ok(());
         };
 
+        let (core_tx, core_rx, tick_stop) = stops(funder.as_ref())?;
         if let Some(funder) = funder {
             // Only a start sets it, and a node starts once.
             let _ = self.inner.funder.set(funder);
         }
+        // Set while the state is held, so a shutdown either finds it or finds the node unstarted.
+        *self.inner.tx_shutdown.lock().unwrap() = Some(core_tx);
         let start = start.take().expect("unstarted Raft must have a start function");
-        let join_handle = start(self.inner.as_ref());
+        let join_handle = start.start(self.inner.as_ref(), core_rx, tick_stop);
         *state = CoreState::Running(join_handle);
+        Ok(())
     }
 }
 
@@ -1054,7 +1082,9 @@ where
     ///
     /// The output stream emits:
     /// - `Ok(log_id)` when logs are successfully flushed
-    /// - `Err(e)` when an error occurs, which terminates the stream
+    /// - `Err(e)` when an error occurs, which terminates the stream: a [`RaftError`], `Fatal` if
+    ///   RaftCore stopped, or `Unfunded` in place of a request whose answer's channel the node's
+    ///   funder refused, unsent
     ///
     /// ## Pinning
     ///
@@ -1090,19 +1120,23 @@ where
     ///             println!("Append error: {}", err);
     ///             break;
     ///         }
-    ///         Err(fatal) => {
-    ///             println!("Fatal: {}", fatal);
+    ///         Err(error) => {
+    ///             println!("Fatal or unfunded: {}", error);
     ///             break;
     ///         }
     ///     }
     /// }
     /// ```
+    #[since(
+        version = "0.10.0",
+        change = "stream item fails as `RaftError`, which may be `Unfunded`"
+    )]
     #[since(version = "0.10.0", change = "stream item contains Fatal")]
     #[since(version = "0.10.0")]
     pub fn stream_append<S>(
         &self,
         stream: S,
-    ) -> impl futures_util::Stream<Item = Result<StreamAppendResult<C>, Fatal<C>>> + OptionalSend + 'static
+    ) -> impl futures_util::Stream<Item = Result<StreamAppendResult<C>, RaftError<C>>> + OptionalSend + 'static
     where
         S: futures_util::Stream<Item = AppendEntriesRequest<C>> + OptionalSend + 'static,
     {
@@ -2133,7 +2167,16 @@ where
     /// raft.shutdown().await?;
     /// ```
     pub async fn shutdown(&self) -> Result<(), JoinErrorOf<C>> {
-        if let Some(tx) = self.inner.tx_shutdown.lock().unwrap().take() {
+        // Taken while the state is held, as a start sets it: a node not yet started is stopped
+        // unstarted here, so no start can follow that this shutdown would miss.
+        let tx_shutdown = {
+            let mut state = self.inner.core_state.lock().unwrap();
+            if let CoreState::Unstarted(_) = &*state {
+                *state = CoreState::Done(Err(Fatal::Stopped));
+            }
+            self.inner.tx_shutdown.lock().unwrap().take()
+        };
+        if let Some(tx) = tx_shutdown {
             // A failure to send means the RaftCore is already shutdown. Continue to check the task
             // return value.
             let send_res = tx.send(());

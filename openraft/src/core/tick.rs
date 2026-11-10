@@ -58,10 +58,13 @@ where C: RaftTypeConfig
 impl<C> Tick<C>
 where C: RaftTypeConfig
 {
+    /// Spawn the tick loop, stopped through `stop`: a channel made by the caller, its block funded
+    /// by the caller before it was made.
     pub(crate) fn spawn(
         period: Duration,
         tx: MpscSenderOf<C, Notification<C>>,
         enabled: WatchReceiverOf<C, bool>,
+        stop: (OneshotSenderOf<C, ()>, OneshotReceiverOf<C, ()>),
     ) -> TickHandle<C> {
         let this = Self {
             period,
@@ -70,7 +73,7 @@ where C: RaftTypeConfig
             tx,
         };
 
-        let (shutdown, shutdown_rx) = C::oneshot();
+        let (shutdown, shutdown_rx) = stop;
 
         let shutdown = Mutex::new(Some(shutdown));
         let join_handle = C::spawn(this.tick_loop(shutdown_rx).instrument(tracing::span!(

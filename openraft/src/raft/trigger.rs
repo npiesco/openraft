@@ -7,8 +7,8 @@ use crate::batch::Batch;
 use crate::core::raft_msg::external_command::ExternalCommand;
 use crate::errors::AllowNextRevertError;
 use crate::errors::Fatal;
+use crate::errors::RaftError;
 use crate::raft::RaftInner;
-use crate::type_config::TypeConfigExt;
 use crate::type_config::alias::BatchOf;
 use crate::type_config::alias::LogIdOf;
 use crate::type_config::alias::VoteOf;
@@ -134,8 +134,9 @@ where C: RaftTypeConfig
     ///   to a previous state for one time.
     /// - `allow=false`: This method instructs the RaftCore to panic if the target node's log revert
     ///
-    /// This method returns a [`Fatal`] error if it failed to send the request to RaftCore, e.g.,
-    /// when RaftCore is shut down.
+    /// This method returns a [`RaftError::Fatal`] error if it failed to send the request to
+    /// RaftCore, e.g., when RaftCore is shut down, or [`RaftError::Unfunded`], nothing sent, if the
+    /// node's funder refuses the channel it waits on for the answer.
     /// Otherwise, it returns an `Ok(Result<_,_>)`, the inner result is:
     /// - `Ok(())` if the request is successfully processed,
     /// - or `Err(AllowNextRevertError)` explaining why the request is rejected.
@@ -165,12 +166,13 @@ where C: RaftTypeConfig
     /// - Restart the target node.
     ///
     /// [`Config::allow_log_reversion`]: `crate::Config::allow_log_reversion`
+    #[since(version = "0.10.0", change = "fails as `RaftError`, which may be `Unfunded`")]
     pub async fn allow_next_revert(
         &self,
         to: &C::NodeId,
         allow: bool,
-    ) -> Result<Result<(), AllowNextRevertError<C>>, Fatal<C>> {
-        let (tx, rx) = C::oneshot();
+    ) -> Result<Result<(), AllowNextRevertError<C>>, RaftError<C>> {
+        let (tx, rx) = self.raft_inner.oneshot()?;
         self.raft_inner
             .send_external_command(ExternalCommand::AllowNextRevert {
                 to: to.clone(),

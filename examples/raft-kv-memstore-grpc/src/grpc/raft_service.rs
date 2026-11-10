@@ -196,7 +196,7 @@ impl RaftService for RaftServiceImpl {
         // Call Raft::stream_append
         let output = self.raft_node.stream_append(input_stream);
 
-        // Convert Result<StreamAppendResult, Fatal> to pb::AppendEntriesResponse
+        // Convert Result<StreamAppendResult, RaftError> to pb::AppendEntriesResponse
         #[allow(clippy::result_large_err)]
         let output_stream = output.map(|result| match result {
             Ok(stream_result) => Ok(stream_result.into()),

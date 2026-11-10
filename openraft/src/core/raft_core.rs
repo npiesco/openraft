@@ -2575,7 +2575,7 @@ where
     ) {
         let node = self.replications.get(&target).expect("replication to target node exists");
 
-        let snapshot_reader = self.sm_handle.new_snapshot_reader();
+        let snapshot_reader = self.sm_handle.new_snapshot_reader(self.engine.config.funding.clone());
         let stream_id = node.stream_id;
         let (replication_task_context, cancel_tx) =
             self.new_replication_task_context(leader_vote, stream_id, target.clone());
@@ -2625,6 +2625,7 @@ where
                     &self.tx_notification,
                     &targets,
                     close_old_streams,
+                    &self.engine.config.funding,
                 )
                 .await;
         }

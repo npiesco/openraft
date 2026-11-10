@@ -153,7 +153,7 @@ where
     pub(crate) fn stream_append<S>(
         self,
         stream: S,
-    ) -> impl Stream<Item = Result<StreamAppendResult<C>, Fatal<C>>> + OptionalSend + 'static
+    ) -> impl Stream<Item = Result<StreamAppendResult<C>, RaftError<C>>> + OptionalSend + 'static
     where
         S: Stream<Item = AppendEntriesRequest<C>> + OptionalSend + 'static,
     {
