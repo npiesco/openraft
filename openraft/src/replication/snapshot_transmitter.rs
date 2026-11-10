@@ -185,7 +185,9 @@ where
 
                     if start_backoff && self.backoff.is_none() {
                         self.backoff = Some(
-                            self.network.backoff().unwrap_or_else(|| self.replication_context.config.build_backoff()),
+                            self.network
+                                .backoff()
+                                .unwrap_or_else(|| Backoff::of_policy(&self.replication_context.config)),
                         );
                     }
 

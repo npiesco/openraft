@@ -26,6 +26,7 @@ mod append_trait;
 mod backoff;
 mod backoff_trait;
 mod factory;
+mod policy_backoff;
 mod raft_network_v1;
 mod rpc_option;
 mod rpc_type;

@@ -300,9 +300,10 @@ where
 
             // Kept separate from `on_error` because only this scope holds a reference
             // to `network`, which is needed to construct the `Backoff` iterator.
-            // If the network returns None, fall back to the policy configured in `Config::backoff`.
+            // If the network returns None, fall back to the policy configured in `Config::backoff`,
+            // read in place, which allocates nothing.
             let config = self.replication_context.config.clone();
-            self.reconcile_backoff(|| network.backoff().unwrap_or_else(|| config.build_backoff())).await;
+            self.reconcile_backoff(|| network.backoff().unwrap_or_else(|| Backoff::of_policy(&config))).await;
 
             let payload = self.select_next_payload().await?;
 
