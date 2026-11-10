@@ -699,7 +699,7 @@ where
             helper.get_initial_state().await.map_err(|err| R::from(Fatal::from(err)))?
         };
 
-        let engine = Engine::new(state, eng_config);
+        let engine = Engine::<C, SM>::new(state, eng_config);
 
         let sm_span = tracing::span!(parent: &core_span, Level::DEBUG, "sm_worker");
 
@@ -875,7 +875,7 @@ where
     id: C::NodeId,
     config: Arc<Config>,
     runtime_config: Shared<RuntimeConfig<C>>,
-    engine: Engine<C>,
+    engine: Engine<C, SM>,
     state_machine: SM,
     log_reader: LS::LogReader,
     log_store: LS,
