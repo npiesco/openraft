@@ -63,12 +63,13 @@ impl<T, const N: usize> SlotLock<T, N> {
 impl<const N: usize> Waiting<N> {
     fn wake_one(&mut self) {
         for slot in self.slots.iter_mut() {
-            if matches!(slot, Slot::Waiting(_))
-                && let Slot::Waiting(waker) = std::mem::replace(slot, Slot::Woken)
-            {
-                waker.wake();
-                return;
+            if !matches!(slot, Slot::Waiting(_)) {
+                continue;
             }
+            if let Slot::Waiting(waker) = std::mem::replace(slot, Slot::Woken) {
+                waker.wake();
+            }
+            return;
         }
     }
 }
@@ -97,8 +98,9 @@ impl<'a, T, const N: usize> Future for Lock<'a, T, N> {
             });
         }
 
-        let free = || state.slots.iter().position(|s| matches!(s, Slot::Free));
-        match this.slot.or_else(free) {
+        // Its own slot, kept from an earlier poll, or the first free one.
+        let free = state.slots.iter().position(|s| matches!(s, Slot::Free));
+        match this.slot.or(free) {
             Some(i) => {
                 match &mut state.slots[i] {
                     Slot::Waiting(waker) => waker.clone_from(cx.waker()),

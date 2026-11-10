@@ -914,9 +914,18 @@ where
     /// commands and postponed responds, and the leaders' last log ids purging dropped. See
     /// [`Funding::shrink`](funding::Funding::shrink).
     pub(crate) fn shrink_queues(&mut self) {
-        let funding = &self.config.funding;
-        self.output.shrink(funding);
-        self.state.log_ids.shrink(funding, &mut self.log_ids_funding);
+        // Split into its fields: the funding is read while the queues and their charges change.
+        let Self {
+            config,
+            state,
+            output,
+            log_ids_funding,
+            ..
+        } = self;
+        let funding: &funding::Funding = &config.funding;
+        output.shrink(funding);
+        let state: &mut RaftState<C> = state;
+        state.log_ids.shrink(funding, log_ids_funding);
     }
 
     /// Poll for commands automatically generated from I/O progress state.

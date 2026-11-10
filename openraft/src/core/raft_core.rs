@@ -1826,8 +1826,10 @@ where
         F: Fn(C::NodeId, NF::Network, RPCOption) -> Fut,
         Fut: Future<Output = ()> + OptionalSend + 'static,
     {
-        // The fields used, borrowed apart: the membership is read from the engine while the
-        // factory makes clients, across its awaits.
+        // The fields used, borrowed apart: `engine` only shared, `network_factory` only mutably,
+        // so the membership and the voter it yields stay borrowed from the engine while the
+        // factory is awaited making a client. Held across those awaits, they are `Send` as
+        // `Membership` is `Sync`: its ids, nodes and owner are.
         let Self {
             id,
             engine,
@@ -1845,7 +1847,7 @@ where
                 return;
             }
         };
-        let mut prepaid = Prepaid::<C>::new(charge, std::convert::identity);
+        let mut prepaid: Prepaid<C, Unfunded> = Prepaid::new(charge, std::convert::identity);
 
         for (target, node) in membership.voters() {
             if target == id {
@@ -1856,11 +1858,14 @@ where
 
             let client = network_factory.new_client(target.clone(), node).await;
 
-            let fut = make_rpc(target.clone(), client, RPCOption::new(ttl));
+            let fut: Fut = make_rpc(target.clone(), client, RPCOption::new(ttl));
 
             // From its share of the charge taken for all of them, held by the task with the client
             // its future holds: refused only if the runtime cannot make the task.
-            let spawned = prepaid.sleeping(client_bytes).and_then(|held| prepaid.spawn(fut, held));
+            let spawned = match prepaid.sleeping(client_bytes) {
+                Ok(held) => prepaid.spawn(fut, held),
+                Err(unfunded) => Err(unfunded),
+            };
             if let Err(Unfunded) = spawned {
                 tracing::warn!(
                     "id={} target={}: no broadcast request: its task is unfunded",
@@ -1887,7 +1892,7 @@ where
         if !funding.is_funded() {
             return Ok(None);
         }
-        let others = || membership.voters().filter(move |(target, _)| *target != id);
+        let others = || membership.voters().filter(move |&(target, _)| target != id);
         let clients = clients_bytes::<C, NF, _>(network_factory, others()).ok_or(Unfunded)?;
         funding.sleeping_tasks::<C, Fut>(others().count(), clients)
     }

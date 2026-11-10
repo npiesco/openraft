@@ -70,11 +70,17 @@ where C: RaftTypeConfig
     /// Gives back the charge of each queue's slots once few of them hold responds, as
     /// [`Funding::shrink`] does.
     pub(crate) fn shrink(&mut self, funding: &Funding) {
-        let [io, flush, apply, snapshot] = &mut self.funding;
-        funding.shrink(&mut self.on_log_io, io);
-        funding.shrink(&mut self.on_log_flush, flush);
-        funding.shrink(&mut self.on_apply, apply);
-        funding.shrink(&mut self.on_snapshot, snapshot);
+        let Self {
+            on_log_io,
+            on_log_flush,
+            on_apply,
+            on_snapshot,
+            funding: [io, flush, apply, snapshot],
+        } = self;
+        funding.shrink(on_log_io, io);
+        funding.shrink(on_log_flush, flush);
+        funding.shrink(on_apply, apply);
+        funding.shrink(on_snapshot, snapshot);
     }
 
     /// Drain all satisfied responds based on the current IO state.

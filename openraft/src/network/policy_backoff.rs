@@ -80,13 +80,20 @@ impl Iterator for PolicyBackoff {
 
     fn next(&mut self) -> Option<Duration> {
         if self.series_left > 0 {
-            let policy = self.config.backoff.as_str();
-            let mut tokens = Tokens::new(policy.get(self.at..)?);
+            // The policy is borrowed from the config while only the cursor fields change.
+            let Self {
+                config,
+                at,
+                series_left,
+                ..
+            } = self;
+            let policy: &str = config.backoff.as_str();
+            let mut tokens = Tokens::new(policy.get(*at..)?);
             let Some(Token::Text(text)) = tokens.next() else {
                 return None;
             };
-            self.at = policy.len() - tokens.rest.len();
-            self.series_left -= 1;
+            *at = policy.len() - tokens.rest.len();
+            *series_left -= 1;
             return parse_duration(text);
         }
 
@@ -129,34 +136,36 @@ impl<'a> Iterator for Tokens<'a> {
             return Some(Token::Separator);
         }
 
-        self.rest = self.rest.trim_start_matches(|c: char| c.is_whitespace() || c == ',');
-        if self.rest.is_empty() {
+        // Read from a copy of the `&'a str`, so each token borrows the policy, not `self`.
+        let rest: &'a str = self.rest;
+        let rest = rest.trim_start_matches(|c: char| c.is_whitespace() || c == ',');
+        if rest.is_empty() {
+            self.rest = rest;
             return None;
         }
 
         // The parser rewrites each `...` of a run of dots, then each `..` left, as a separator
         // between spaces: a run of 3q+2 dots is q+1 separators, of 3q dots q, and of 3q+1 dots
         // q, its last dot left to start the next token.
-        let dots = self.rest.bytes().take_while(|b| *b == b'.').count();
+        let dots = rest.bytes().take_while(|b| *b == b'.').count();
         if dots >= 2 {
             let (separators, left) = match dots % 3 {
                 0 => (dots / 3, 0),
                 1 => (dots / 3, 1),
                 _ => (dots / 3 + 1, 0),
             };
-            self.rest = &self.rest[dots - left..];
+            self.rest = &rest[dots - left..];
             self.separators = separators - 1;
             return Some(Token::Separator);
         }
 
         // A token ends at whitespace, a `,`, or the `..` that starts a separator.
-        let end = self
-            .rest
+        let end = rest
             .char_indices()
-            .find(|&(i, c)| c.is_whitespace() || c == ',' || (i > 0 && self.rest[i..].starts_with("..")))
-            .map_or(self.rest.len(), |(i, _)| i);
-        let (text, rest) = self.rest.split_at(end);
-        self.rest = rest;
+            .find(|&(i, c)| c.is_whitespace() || c == ',' || (i > 0 && rest[i..].starts_with("..")))
+            .map_or(rest.len(), |(i, _)| i);
+        let (text, after): (&'a str, &'a str) = rest.split_at(end);
+        self.rest = after;
         Some(Token::Text(text))
     }
 }
