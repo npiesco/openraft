@@ -230,12 +230,15 @@ where
     /// follower. This step is not confined by the consensus protocol and has to be dealt with
     /// differently.
     ///
+    /// `membership` is declared after `payload`, so a refusal frees it before the payload that
+    /// may account for its memory.
+    ///
     /// [precondition]: crate::docs::cluster_control::cluster_formation#preconditions-for-initialization
     #[tracing::instrument(level = "debug", skip_all)]
     pub(crate) fn initialize(
         &mut self,
-        membership: Membership<C::NodeId, C::Node>,
         payload: C::Payload,
+        membership: Membership<C::NodeId, C::Node>,
     ) -> Result<(), InitializeError<C>> {
         self.check_initialize()?;
 

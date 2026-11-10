@@ -892,7 +892,7 @@ where
 
         let membership = Membership::from(member_nodes);
 
-        let res = self.engine.initialize(membership, payload);
+        let res = self.engine.initialize(payload, membership);
 
         let has_error = res.is_err();
 
