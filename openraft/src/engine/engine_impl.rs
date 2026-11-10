@@ -6,6 +6,7 @@ use validit::Valid;
 use crate::LogIdOptionExt;
 use crate::Membership;
 use crate::RaftTypeConfig;
+use crate::async_runtime::Charge;
 use crate::batch::Batch;
 use crate::core::ServerState;
 use crate::core::raft_msg::AppendEntriesTx;
@@ -108,6 +109,10 @@ where
 
     /// Output entry for the runtime.
     pub(crate) output: EngineOutput<C, SM>,
+
+    /// The charge for the capacity of the log id list in `state`, declared after it so that it
+    /// is credited back only once that buffer is freed.
+    pub(crate) log_ids_funding: Option<Charge>,
 }
 
 impl<C, SM> Engine<C, SM>
@@ -124,6 +129,7 @@ where
             candidate: None,
             pre_candidate: None,
             output: EngineOutput::default(),
+            log_ids_funding: None,
         }
     }
 
@@ -133,13 +139,17 @@ where
     /// [`RaftState`]
     ///
     /// It is charged, with the Leader it may become, before it is built: refused, nothing is
-    /// built and nothing changes.
+    /// built and nothing changes. Room in the log id list for the last log id of the Leader it
+    /// may become is reserved with it, so that the Leader's first entry does not grow the list
+    /// unfunded.
     pub(crate) fn new_candidate(&mut self, vote: VoteOf<C>) -> Result<&mut Candidate<C, LeaderQuorumSet<C>>, Unfunded> {
         let membership = self.state.membership_state.effective().membership();
 
         let leader_bytes = funding::leader_state_bytes::<C>(membership);
         let mut charge = self.config.funding.charge(funding::candidate_state_bytes::<C>(membership) + leader_bytes)?;
         let leader_charge = charge.as_mut().and_then(|charge| charge.split(leader_bytes));
+        self.state.log_ids.reserve(&self.config.funding, &mut self.log_ids_funding, 1)?;
+        let membership = self.state.membership_state.effective().membership();
 
         let now = C::now();
         let last_log_id = self.state.last_log_id().cloned();
@@ -263,6 +273,12 @@ where
         self.check_initialize()?;
 
         self.check_members_contain_me(&membership)?;
+
+        // Room for the first log id, charged before the list grows: refused, nothing changes.
+        self.state
+            .log_ids
+            .reserve(&self.config.funding, &mut self.log_ids_funding, 1)
+            .map_err(|_| MembershipRefused)?;
 
         // Bound before any state changes, so a refusal leaves the node pristine.
         let payload = payload.bind_membership(membership)?;
@@ -704,13 +720,9 @@ where
 
         // Vote is legal.
 
-        let last = segment.last();
-
         let mut fh = self.following_handler();
         fh.ensure_log_consecutive(segment.prev_log_id.as_ref())?;
-        fh.append_entries(segment.prev_log_id, segment.entries);
-
-        Ok(last)
+        Ok(fh.append_entries(segment.prev_log_id, segment.entries))
     }
 
     /// Install a completely received snapshot on a follower.
@@ -1065,6 +1077,7 @@ where
             leader: &mut self.leader,
             candidate: &mut self.candidate,
             pre_candidate: &mut self.pre_candidate,
+            log_ids_funding: &mut self.log_ids_funding,
         }
     }
 
@@ -1135,6 +1148,7 @@ where
             config: &mut self.config,
             state: &mut self.state,
             output: &mut self.output,
+            log_ids_funding: &mut self.log_ids_funding,
         }
     }
 

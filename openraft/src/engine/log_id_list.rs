@@ -4,11 +4,14 @@ use crate::LogId;
 use crate::RaftLogReader;
 use crate::RaftTypeConfig;
 use crate::StorageError;
+use crate::async_runtime::Charge;
 use crate::engine::leader_log_ids::LeaderLogIds;
+use crate::errors::Unfunded;
 use crate::log_id::option_raft_log_id_ext::OptionRaftLogIdExt;
 use crate::log_id::raft_log_id::RaftLogId;
 use crate::log_id::raft_log_id_ext::RaftLogIdExt;
 use crate::log_id::ref_log_id::RefLogId;
+use crate::proposer::funding::Funding;
 use crate::storage::RaftLogReaderExt;
 use crate::vote::RaftCommittedLeaderId;
 
@@ -199,6 +202,23 @@ where CLID: RaftCommittedLeaderId
         }
     }
 
+    /// Room for `keys` more leaders' last log ids, the whole capacity it grows to charged to
+    /// `funding` before it grows and held in `held`, as [`Funding::reserve`] does: refused as
+    /// [`Unfunded`], nothing is allocated or charged.
+    pub(crate) fn reserve(
+        &mut self,
+        funding: &Funding,
+        held: &mut Option<Charge>,
+        keys: usize,
+    ) -> Result<(), Unfunded> {
+        funding.reserve(&mut self.key_log_ids, held, keys)
+    }
+
+    /// How many more leaders' last log ids it has room for without growing.
+    pub(crate) fn spare(&self) -> usize {
+        self.key_log_ids.capacity() - self.key_log_ids.len()
+    }
+
     /// Extends with a list of `log_id`.
     pub(crate) fn extend<LID, I>(&mut self, new_ids: I)
     where
@@ -294,14 +314,15 @@ where CLID: RaftCommittedLeaderId
         // Find entries that are completely purged (last_index <= upto.index)
         let res = self.key_log_ids.binary_search_by(|log_id| log_id.index().cmp(&upto_index));
 
+        // Removed in place: the buffer, and the charge for its capacity, are kept.
         match res {
             Ok(i) => {
                 // Exact match: entries 0..=i are purged
-                self.key_log_ids = self.key_log_ids.split_off(i + 1);
+                self.key_log_ids.drain(..=i);
             }
             Err(i) => {
                 // upto.index is between entries: entries 0..i are purged
-                self.key_log_ids = self.key_log_ids.split_off(i);
+                self.key_log_ids.drain(..i);
             }
         }
 

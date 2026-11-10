@@ -6,6 +6,7 @@
 //! freed: the charge is held by the state it funds, declared after what it funds. A node
 //! [`run`](crate::Raft::run) without a funder charges nothing.
 
+use std::collections::TryReserveError;
 use std::collections::VecDeque;
 use std::fmt;
 use std::future::Future;
@@ -85,21 +86,68 @@ impl Funding {
     /// the capacity it had, credited back only once the buffer that capacity was is freed; refused
     /// as [`Unfunded`], nothing is allocated or charged. An unfunded node's queue grows as it is
     /// pushed to.
-    pub(crate) fn reserve<T>(
+    pub(crate) fn reserve<B: Buffer>(
         &self,
-        queue: &mut VecDeque<T>,
+        queue: &mut B,
         held: &mut Option<Charge>,
         room: usize,
     ) -> Result<(), Unfunded> {
-        let needed = queue.len().saturating_add(room);
-        if !self.is_funded() || queue.capacity() >= needed {
+        let needed = queue.items().saturating_add(room);
+        if !self.is_funded() || queue.slots() >= needed {
             return Ok(());
         }
-        let capacity = needed.max(queue.capacity().saturating_mul(2));
-        let charge = self.charge(capacity.saturating_mul(size_of::<T>()))?;
-        queue.try_reserve_exact(capacity - queue.len()).map_err(|_| Unfunded)?;
+        let capacity = needed.max(queue.slots().saturating_mul(2));
+        let charge = self.charge(capacity.saturating_mul(size_of::<B::Item>()))?;
+        queue.grow_exact(capacity - queue.items()).map_err(|_| Unfunded)?;
         *held = charge;
         Ok(())
+    }
+}
+
+/// A buffer of contiguous slots, grown by [`Funding::reserve`] once the capacity it grows to is
+/// charged.
+pub(crate) trait Buffer {
+    type Item;
+
+    /// The items it holds.
+    fn items(&self) -> usize;
+
+    /// The items it has room for without growing.
+    fn slots(&self) -> usize;
+
+    /// Room for `more` items than it holds, exactly, or the allocator's refusal.
+    fn grow_exact(&mut self, more: usize) -> Result<(), TryReserveError>;
+}
+
+impl<T> Buffer for VecDeque<T> {
+    type Item = T;
+
+    fn items(&self) -> usize {
+        self.len()
+    }
+
+    fn slots(&self) -> usize {
+        self.capacity()
+    }
+
+    fn grow_exact(&mut self, more: usize) -> Result<(), TryReserveError> {
+        self.try_reserve_exact(more)
+    }
+}
+
+impl<T> Buffer for Vec<T> {
+    type Item = T;
+
+    fn items(&self) -> usize {
+        self.len()
+    }
+
+    fn slots(&self) -> usize {
+        self.capacity()
+    }
+
+    fn grow_exact(&mut self, more: usize) -> Result<(), TryReserveError> {
+        self.try_reserve_exact(more)
     }
 }
 

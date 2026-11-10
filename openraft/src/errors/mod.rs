@@ -217,7 +217,8 @@ where C: RaftTypeConfig
     #[error(transparent)]
     NotInMembers(#[from] NotInMembers<C>),
 
-    /// The payload refused to bind the initial membership.
+    /// The payload refused to bind the initial membership, or room in the log id list for its
+    /// entry was not funded.
     #[since(version = "0.10.0")]
     #[error(transparent)]
     MembershipRefused(#[from] MembershipRefused),

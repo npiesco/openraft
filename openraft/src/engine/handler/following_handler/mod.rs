@@ -3,6 +3,7 @@ use display_more::DisplaySliceExt;
 
 use crate::RaftState;
 use crate::RaftTypeConfig;
+use crate::async_runtime::Charge;
 use crate::core::sm;
 use crate::engine::Command;
 use crate::engine::Condition;
@@ -21,6 +22,7 @@ use crate::raft_state::LogStateReader;
 use crate::raft_state::io_state::log_io_id::LogIOId;
 use crate::storage::RaftStateMachine;
 use crate::type_config::alias::BatchOf;
+use crate::type_config::alias::CommittedLeaderIdOf;
 use crate::type_config::alias::CommittedVoteOf;
 use crate::type_config::alias::LogEntriesOf;
 use crate::type_config::alias::LogIdOf;
@@ -53,6 +55,9 @@ where
     pub(crate) config: &'x mut EngineConfig<C>,
     pub(crate) state: &'x mut RaftState<C>,
     pub(crate) output: &'x mut EngineOutput<C, SM>,
+
+    /// The charge for the capacity of the log id list in `state`.
+    pub(crate) log_ids_funding: &'x mut Option<Charge>,
 }
 
 impl<C, SM> FollowingHandler<'_, C, SM>
@@ -60,11 +65,19 @@ where
     C: RaftTypeConfig,
     SM: RaftStateMachine<C>,
 {
-    /// Append entries to follower/learner.
+    /// Append entries to follower/learner, and return the last log id it took.
     ///
     /// Also clean conflicting entries and update membership state.
+    ///
+    /// Room in the log id list for the leaders the new entries add is charged before the list
+    /// grows: refused, only the leading entries the room it has holds are taken, and the Leader
+    /// sends the rest again.
     #[tracing::instrument(level = "debug", skip_all)]
-    pub(crate) fn append_entries(&mut self, prev_log_id: Option<LogIdOf<C>>, entries: impl Into<LogEntriesOf<C>>) {
+    pub(crate) fn append_entries(
+        &mut self,
+        prev_log_id: Option<LogIdOf<C>>,
+        entries: impl Into<LogEntriesOf<C>>,
+    ) -> Option<LogIdOf<C>> {
         let mut entries = entries.into();
         tracing::debug!(
             "{}: local last_log_id: {}, request: prev_log_id: {}, entries: {}",
@@ -78,13 +91,21 @@ where
             debug_assert!(first_ent.index() == prev_log_id.next_index());
         }
 
+        let since = self.state.first_conflicting_index(&*entries);
+        // The leader of the log id the new entries follow, once the conflicting ones are deleted.
+        let before = match since.checked_sub(1) {
+            Some(i) => Some(entries[i].ref_log_id().committed_leader_id()),
+            None => prev_log_id.as_ref().map(|prev| prev.committed_leader_id()),
+        };
+        let fits = self.fund_log_ids(before, &entries[since..]);
+        entries.truncate(since + fits);
+
         let last_log_id = entries.last().map(|ent| ent.log_id());
         let last_log_id = std::cmp::max(prev_log_id, last_log_id);
 
         let prev_accepted = self.state.accept_log_io(IOId::new_log_io(self.leader_vote.clone(), last_log_id.clone()));
 
         let l = entries.len();
-        let since = self.state.first_conflicting_index(&*entries);
         if since < l {
             // Before appending, if an entry overrides a conflicting one,
             // the entries after it has to be deleted first.
@@ -100,11 +121,11 @@ where
             // No actual IO is needed, but just need to update I/O state,
             // after all preceding IO flushed.
 
-            let to_submit = IOId::new_log_io(self.leader_vote.clone(), last_log_id);
+            let to_submit = IOId::new_log_io(self.leader_vote.clone(), last_log_id.clone());
 
             if Some(&to_submit) <= prev_accepted.as_ref() {
                 // No io state to update.
-                return;
+                return last_log_id;
             }
 
             let condition = prev_accepted.map(|x| Condition::IOFlushed { io_id: x });
@@ -114,6 +135,41 @@ where
                 io_id: to_submit,
             });
         }
+        last_log_id
+    }
+
+    /// How many of `appended`, the entries about to be appended after a log id of leader
+    /// `before`, the log id list has room for.
+    ///
+    /// Room for the last log id of each leader they add is charged before the list grows, and
+    /// all of them are taken; refused, nothing is charged or allocated, and only the leading
+    /// entries whose leaders fit in the room the list has are.
+    fn fund_log_ids(&mut self, before: Option<&CommittedLeaderIdOf<C>>, appended: &[C::Entry]) -> usize {
+        // The leaders of the first `len` entries that are not the leader of the one before.
+        let added = |len: usize| {
+            let mut last = before;
+            let mut added = 0;
+            for ent in &appended[..len] {
+                let leader = ent.ref_log_id().committed_leader_id();
+                if last != Some(leader) {
+                    added += 1;
+                }
+                last = Some(leader);
+            }
+            added
+        };
+
+        let funding = &self.config.funding;
+        if self.state.log_ids.reserve(funding, self.log_ids_funding, added(appended.len())).is_ok() {
+            return appended.len();
+        }
+
+        let spare = self.state.log_ids.spare();
+        let mut taken = 0;
+        while taken < appended.len() && added(taken + 1) <= spare {
+            taken += 1;
+        }
+        taken
     }
 
     /// Ensures the log to replicate is consecutive to the local log.

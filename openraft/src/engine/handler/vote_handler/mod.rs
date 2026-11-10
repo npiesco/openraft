@@ -6,6 +6,7 @@ use display_more::DisplayOptionExt;
 use crate::OptionalSend;
 use crate::RaftState;
 use crate::RaftTypeConfig;
+use crate::async_runtime::Charge;
 use crate::display_ext::display_instant::DisplayInstantExt;
 use crate::engine::Command;
 use crate::engine::Condition;
@@ -53,6 +54,7 @@ where
     pub(crate) leader: &'st mut LeaderState<C>,
     pub(crate) candidate: &'st mut CandidateState<C>,
     pub(crate) pre_candidate: &'st mut CandidateState<C>,
+    pub(crate) log_ids_funding: &'st mut Option<Charge>,
 }
 
 impl<C, SM> VoteHandler<'_, C, SM>
@@ -212,6 +214,16 @@ where
             self.refuse_leading();
             return;
         };
+        // Room for the last log id of its first entry, charged before the list grows.
+        if self.state.log_ids.reserve(&self.config.funding, self.log_ids_funding, 1).is_err() {
+            tracing::warn!(
+                "not leading vote {}: its first log id is not funded",
+                self.state.vote_ref()
+            );
+            drop(charge);
+            self.refuse_leading();
+            return;
+        }
 
         let leader = self.state.new_leader(charge);
         let leader_vote = leader.committed_vote_ref().clone();
