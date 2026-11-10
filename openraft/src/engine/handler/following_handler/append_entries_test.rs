@@ -14,6 +14,7 @@ use crate::engine::testing::UTConfig;
 use crate::engine::testing::log_id;
 use crate::raft_state::IOId;
 use crate::raft_state::LogStateReader;
+use crate::storage::LogEntries;
 use crate::testing::blank_ent;
 use crate::type_config::TypeConfigExt;
 use crate::type_config::alias::StoredMembershipOf;
@@ -77,6 +78,7 @@ fn test_follower_append_entries_update_accepted() -> anyhow::Result<()> {
         Command::AppendEntries {
             committed_vote: Vote::new(2, 1).to_committed(),
             entries: Batch::of([blank_ent::<UTConfig>(3, 1, 4), blank_ent::<UTConfig>(3, 1, 5)]),
+            owner: None,
         }
     ]);
 
@@ -121,6 +123,33 @@ fn test_follower_append_entries_update_accepted() -> anyhow::Result<()> {
             //
         ]);
     }
+
+    Ok(())
+}
+
+/// An owned segment's owner travels with the entries the follower keeps, the one already present
+/// dropped in place, into the command that appends them: the owner is dropped only after the
+/// storage took the entries.
+#[test]
+fn test_follower_append_entries_keeps_the_owner_until_appended() -> anyhow::Result<()> {
+    let mut eng = eng();
+    eng.output.clear_commands();
+
+    eng.following_handler().append_entries(
+        Some(log_id(1, 1, 2)),
+        LogEntries::owned(vec![blank_ent::<UTConfig>(2, 1, 3), blank_ent::<UTConfig>(3, 1, 4)], ()),
+    );
+    eng.following_handler().append_entries(Some(log_id(3, 1, 4)), vec![blank_ent::<UTConfig>(3, 1, 5)]);
+
+    let commands = eng.output.take_commands();
+    let owners = commands
+        .iter()
+        .filter_map(|command| match command {
+            Command::AppendEntries { entries, owner, .. } => Some((entries.len(), owner.is_some())),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(vec![(1, true), (1, false)], owners);
 
     Ok(())
 }

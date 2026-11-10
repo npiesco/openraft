@@ -229,6 +229,7 @@ fn test_handle_vote_resp_equal_vote() -> anyhow::Result<()> {
                 Command::AppendEntries {
                     committed_vote: Vote::new(2, 1).to_committed(),
                     entries: Batch::of([EntryOf::<UTConfig>::new_blank(log_id(2, 1, 1))]),
+                    owner: None,
                 },
                 Command::Replicate {
                     target: 2,

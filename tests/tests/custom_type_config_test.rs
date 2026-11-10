@@ -44,6 +44,12 @@ impl<T> IntoIterator for VecBatch<T> {
     }
 }
 
+impl<T> From<Vec<T>> for VecBatch<T> {
+    fn from(inner: Vec<T>) -> Self {
+        VecBatch { inner }
+    }
+}
+
 impl<T> FromIterator<T> for VecBatch<T> {
     fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
         VecBatch {

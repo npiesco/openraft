@@ -79,7 +79,8 @@ fn test_become_leader() -> anyhow::Result<()> {
         },
         Command::AppendEntries {
             committed_vote: Vote::new(2, 1).to_committed(),
-            entries: Batch::of([EntryOf::<UTConfig>::new_blank(log_id(2, 1, 0))])
+            entries: Batch::of([EntryOf::<UTConfig>::new_blank(log_id(2, 1, 0))]),
+            owner: None,
         },
         // Pipeline mode: ProgressEntry::empty(0) has matching.next_index()=0 == searching_end=0
         Command::Replicate {

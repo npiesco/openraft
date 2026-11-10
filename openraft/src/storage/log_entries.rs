@@ -14,12 +14,14 @@ use std::ops::DerefMut;
 /// only after the entries' buffer is freed. An implementation that accounts for nothing returns
 /// its `Vec` with `.into()`.
 ///
-/// A follower's core takes a received request's entries as a bare `Vec`
-/// ([`LogEntries::into_parts`]). Entries decoded from the network have no owner.
+/// A follower's core keeps a received request's entries with their owner, in the buffer they
+/// arrived in, until [`RaftLogStorage::append`] took them and returned; only then is the owner
+/// dropped. Entries decoded from the network have no owner.
 ///
 /// A clone has no owner: the cloner owns the clone's memory.
 ///
 /// [`RaftLogReader`]: crate::storage::RaftLogReader
+/// [`RaftLogStorage::append`]: crate::storage::RaftLogStorage::append
 /// [`RaftTypeConfig::EntriesOwner`]: crate::RaftTypeConfig::EntriesOwner
 /// [`AppendEntriesRequest`]: crate::raft::AppendEntriesRequest
 pub struct LogEntries<E, O = ()> {
@@ -45,6 +47,16 @@ impl<E, O> LogEntries<E, O> {
     /// Keeps the first `len` entries, dropping the rest. The buffer and its owner are kept.
     pub fn truncate(&mut self, len: usize) {
         self.entries.truncate(len);
+    }
+
+    /// Drops the first `count` entries, moving the rest to the front of the same buffer:
+    /// nothing is allocated, and the buffer and its owner are kept.
+    ///
+    /// # Panics
+    ///
+    /// If `count` is greater than the number of entries.
+    pub fn remove_front(&mut self, count: usize) {
+        self.entries.drain(..count);
     }
 
     /// The entries and their owner, apart. The caller drops the owner only after the entries'
@@ -160,5 +172,24 @@ impl<E: serde::Serialize, O> serde::Serialize for LogEntries<E, O> {
 impl<'de, E: serde::Deserialize<'de>, O> serde::Deserialize<'de> for LogEntries<E, O> {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         <Vec<E> as serde::Deserialize<'de>>::deserialize(deserializer).map(Self::new)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::LogEntries;
+
+    #[test]
+    fn test_remove_front_keeps_the_buffer_and_its_owner() {
+        let mut entries = LogEntries::owned(vec![1u64, 2, 3, 4], "owner");
+        let buffer = entries.as_ptr();
+
+        entries.remove_front(2);
+
+        assert_eq!(&*entries, &[3, 4]);
+        assert_eq!(buffer, entries.as_ptr());
+        let (entries, owner) = entries.into_parts();
+        assert_eq!(4, entries.capacity());
+        assert_eq!(Some("owner"), owner);
     }
 }

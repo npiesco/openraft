@@ -5,21 +5,30 @@ use display_more::DisplaySliceExt;
 
 use crate::RaftTypeConfig;
 use crate::entry::RaftEntry;
+use crate::type_config::alias::LogEntriesOf;
 use crate::type_config::alias::LogIdOf;
 
 /// A contiguous segment of log entries, anchored by the entry immediately preceding it.
 ///
 /// - `prev_log_id`: the log id of the entry just before this segment; `None` means the segment
 ///   starts at the very beginning of the log.
-/// - `entries`: the entries in this segment, each consecutive to the previous.
+/// - `entries`: the entries in this segment, each consecutive to the previous, with what accounts
+///   for their memory, if anything does.
 pub struct LogSegment<C: RaftTypeConfig> {
     pub prev_log_id: Option<LogIdOf<C>>,
-    pub entries: Vec<C::Entry>,
+    pub entries: LogEntriesOf<C>,
 }
 
 impl<C: RaftTypeConfig> LogSegment<C> {
-    pub fn new(prev_log_id: Option<LogIdOf<C>>, entries: Vec<C::Entry>) -> Self {
-        Self { prev_log_id, entries }
+    /// A segment of `entries`: a `Vec`, which nothing accounts for, or [`LogEntries`] kept with
+    /// their owner.
+    ///
+    /// [`LogEntries`]: crate::storage::LogEntries
+    pub fn new(prev_log_id: Option<LogIdOf<C>>, entries: impl Into<LogEntriesOf<C>>) -> Self {
+        Self {
+            prev_log_id,
+            entries: entries.into(),
+        }
     }
 
     /// Returns the log id of the last entry in this segment, or `prev_log_id` if empty.

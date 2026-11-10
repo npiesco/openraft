@@ -88,6 +88,7 @@ fn test_startup_as_leader_without_logs() -> anyhow::Result<()> {
             Command::AppendEntries {
                 committed_vote: Vote::new(2, 2).to_committed(),
                 entries: Batch::of([EntryOf::<UTConfig>::new_blank(log_id(2, 2, 4))]),
+                owner: None,
             },
             Command::Replicate {
                 target: 3,

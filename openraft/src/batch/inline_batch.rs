@@ -30,6 +30,16 @@ impl<T> IntoIterator for InlineBatch<T> {
     }
 }
 
+/// Keeps the vector's buffer, or, if it holds no more than one element, moves it inline and frees
+/// the buffer: never copies the elements into another allocation.
+impl<T> From<Vec<T>> for InlineBatch<T> {
+    fn from(items: Vec<T>) -> Self {
+        InlineBatch {
+            inner: SmallVec::from_vec(items),
+        }
+    }
+}
+
 impl<T> FromIterator<T> for InlineBatch<T> {
     fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
         InlineBatch {

@@ -35,6 +35,8 @@ where
     /// - A non-AppendEntries command is encountered
     /// - A different leader's command is encountered
     /// - The total entry count reaches `config.max_append_entries`
+    /// - Either command's entries have an owner accounting for their memory: merging would grow one
+    ///   buffer beyond what its owner accounts for
     ///
     /// The entry limit prevents creating excessively large batches that could cause
     /// high latency in storage operations.
@@ -49,6 +51,7 @@ where
         let Command::AppendEntries {
             committed_vote,
             mut entries,
+            owner: None,
         } = c
         else {
             commands.push_front(c);
@@ -62,6 +65,7 @@ where
                 Command::AppendEntries {
                     committed_vote: next_vote,
                     entries: next_entries,
+                    owner: None,
                 } if next_vote == committed_vote && entries.len() as u64 + next_entries.len() as u64 <= max_entries => {
                     n += 1;
                     entries.extend(next_entries);
@@ -82,6 +86,7 @@ where
         commands.push_front(Command::AppendEntries {
             committed_vote,
             entries,
+            owner: None,
         });
     }
 }
@@ -128,6 +133,7 @@ mod tests {
         output.push_command(Command::AppendEntries {
             committed_vote: committed_vote(1, 0),
             entries: Batch::of([blank_ent::<UTConfig>(1, 0, 1)]),
+            owner: None,
         });
         let mut scheduler = CommandScheduler::new(&config, &mut output);
         scheduler.merge_front_append_entries();
@@ -142,6 +148,7 @@ mod tests {
         output.push_command(Command::AppendEntries {
             committed_vote: committed_vote(1, 0),
             entries: Batch::of([blank_ent::<UTConfig>(1, 0, 1)]),
+            owner: None,
         });
         let mut scheduler = CommandScheduler::new(&config, &mut output);
         scheduler.merge_front_append_entries();
@@ -155,14 +162,17 @@ mod tests {
         output.push_command(Command::AppendEntries {
             committed_vote: committed_vote(1, 0),
             entries: Batch::of([blank_ent::<UTConfig>(1, 0, 1)]),
+            owner: None,
         });
         output.push_command(Command::AppendEntries {
             committed_vote: committed_vote(1, 0),
             entries: Batch::of([blank_ent::<UTConfig>(1, 0, 2)]),
+            owner: None,
         });
         output.push_command(Command::AppendEntries {
             committed_vote: committed_vote(1, 0),
             entries: Batch::of([blank_ent::<UTConfig>(1, 0, 3)]),
+            owner: None,
         });
 
         let mut scheduler = CommandScheduler::new(&config, &mut output);
@@ -183,10 +193,12 @@ mod tests {
         output.push_command(Command::AppendEntries {
             committed_vote: committed_vote(1, 0),
             entries: Batch::of([blank_ent::<UTConfig>(1, 0, 1)]),
+            owner: None,
         });
         output.push_command(Command::AppendEntries {
             committed_vote: committed_vote(2, 0), // Different vote
             entries: Batch::of([blank_ent::<UTConfig>(2, 0, 2)]),
+            owner: None,
         });
 
         let mut scheduler = CommandScheduler::new(&config, &mut output);
@@ -202,15 +214,18 @@ mod tests {
         output.push_command(Command::AppendEntries {
             committed_vote: committed_vote(1, 0),
             entries: Batch::of([blank_ent::<UTConfig>(1, 0, 1)]),
+            owner: None,
         });
         output.push_command(Command::AppendEntries {
             committed_vote: committed_vote(1, 0),
             entries: Batch::of([blank_ent::<UTConfig>(1, 0, 2)]),
+            owner: None,
         });
         output.push_command(Command::SaveVote { vote: Vote::new(1, 0) });
         output.push_command(Command::AppendEntries {
             committed_vote: committed_vote(1, 0),
             entries: Batch::of([blank_ent::<UTConfig>(1, 0, 3)]),
+            owner: None,
         });
 
         let mut scheduler = CommandScheduler::new(&config, &mut output);
@@ -233,14 +248,17 @@ mod tests {
         output.push_command(Command::AppendEntries {
             committed_vote: committed_vote(1, 0),
             entries: Batch::of([blank_ent::<UTConfig>(1, 0, 1), blank_ent::<UTConfig>(1, 0, 2)]),
+            owner: None,
         });
         output.push_command(Command::AppendEntries {
             committed_vote: committed_vote(1, 0),
             entries: Batch::of([blank_ent::<UTConfig>(1, 0, 3)]),
+            owner: None,
         });
         output.push_command(Command::AppendEntries {
             committed_vote: committed_vote(1, 0),
             entries: Batch::of([blank_ent::<UTConfig>(1, 0, 4)]),
+            owner: None,
         });
 
         let mut scheduler = CommandScheduler::new(&config, &mut output);
@@ -253,5 +271,40 @@ mod tests {
         } else {
             panic!("Expected AppendEntries");
         }
+    }
+
+    /// Entries with an owner accounting for their memory are never merged, before or after:
+    /// growing either buffer would exceed what its owner accounts for.
+    #[test]
+    fn test_merge_skips_owned_entries() {
+        let config = Config::default();
+        let mut output: EngineOutput<C> = EngineOutput::new(8);
+        output.push_command(Command::AppendEntries {
+            committed_vote: committed_vote(1, 0),
+            entries: Batch::of([blank_ent::<UTConfig>(1, 0, 1)]),
+            owner: None,
+        });
+        output.push_command(Command::AppendEntries {
+            committed_vote: committed_vote(1, 0),
+            entries: Batch::of([blank_ent::<UTConfig>(1, 0, 2)]),
+            owner: Some(()),
+        });
+
+        CommandScheduler::new(&config, &mut output).merge_front_append_entries();
+        assert_eq!(output.commands.len(), 2);
+
+        output.commands.pop_front();
+        output.push_command(Command::AppendEntries {
+            committed_vote: committed_vote(1, 0),
+            entries: Batch::of([blank_ent::<UTConfig>(1, 0, 3)]),
+            owner: None,
+        });
+
+        CommandScheduler::new(&config, &mut output).merge_front_append_entries();
+        assert_eq!(output.commands.len(), 2);
+        let Command::AppendEntries { owner, .. } = &output.commands[0] else {
+            panic!("Expected AppendEntries");
+        };
+        assert_eq!(&Some(()), owner);
     }
 }

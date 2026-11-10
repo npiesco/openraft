@@ -134,6 +134,7 @@ where
             // It is allowed to be different from local vote.
             committed_vote: self.leader.committed_vote.clone(),
             entries,
+            owner: None,
         });
 
         let mut rh = self.replication_handler();

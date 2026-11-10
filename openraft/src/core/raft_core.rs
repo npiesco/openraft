@@ -1736,10 +1736,8 @@ where
     pub(super) fn handle_append_entries_request(&mut self, req: AppendEntriesRequest<C>, tx: AppendEntriesTx<C>) {
         tracing::debug!("{}: req: {}", func_name!(), req);
 
-        // The core keeps entries as a bare `Vec`: an owner attached to a received request's entries
-        // is released here, before the entries are freed. Entries decoded from the network have none.
-        let (entries, _owner) = req.entries.into_parts();
-        let segment = LogSegment::new(req.prev_log_id, entries);
+        // The entries stay with their owner, if they have one, until the log store took them.
+        let segment = LogSegment::new(req.prev_log_id, req.entries);
         self.engine.handle_append_entries(&req.vote, segment, tx);
 
         // Record append entries to external metrics recorder
@@ -2723,7 +2721,12 @@ where
             Command::AppendEntries {
                 committed_vote,
                 entries,
-            } => self.run_append_entries(committed_vote, entries).await?,
+                owner,
+            } => {
+                self.run_append_entries(committed_vote, entries).await?;
+                // The log store took the entries and returned: what accounted for them goes.
+                drop(owner);
+            }
             Command::SaveVote { vote } => self.run_save_vote(vote).await?,
             Command::PurgeLog { upto } => self.run_purge_log(upto).await?,
             Command::TruncateLog { after } => self.run_truncate_log(after).await?,

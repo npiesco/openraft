@@ -83,6 +83,7 @@ mod tests {
         let cmd: Command<C> = Command::AppendEntries {
             committed_vote: cv.clone(),
             entries: Batch::of([]),
+            owner: None,
         };
         assert_eq!(cmd.name(), CommandName::AppendEntries);
 

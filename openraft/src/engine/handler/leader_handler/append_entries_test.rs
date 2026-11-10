@@ -153,7 +153,8 @@ fn test_leader_append_entries_normal() -> anyhow::Result<()> {
                     blank_ent::<UTConfig>(3, 1, 4), //
                     blank_ent::<UTConfig>(3, 1, 5),
                     blank_ent::<UTConfig>(3, 1, 6),
-                ])
+                ]),
+                owner: None,
             },
             Command::Replicate {
                 target: 2,
@@ -219,7 +220,8 @@ fn test_leader_append_entries_single_node_leader() -> anyhow::Result<()> {
                 blank_ent::<UTConfig>(3, 1, 4), //
                 blank_ent::<UTConfig>(3, 1, 5),
                 blank_ent::<UTConfig>(3, 1, 6),
-            ])
+            ]),
+            owner: None,
         },],
         eng.output.take_commands()
     );
@@ -282,7 +284,8 @@ fn test_leader_append_entries_with_membership_log() -> anyhow::Result<()> {
                     blank_ent::<UTConfig>(3, 1, 4), //
                     EntryOf::<UTConfig>::new_membership(log_id(3, 1, 5), m1_2()),
                     blank_ent::<UTConfig>(3, 1, 6),
-                ])
+                ]),
+                owner: None,
             },
             Command::RebuildReplicationStreams {
                 leader_vote: Vote::new(3, 1).to_committed(),

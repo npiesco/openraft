@@ -4,10 +4,14 @@ use crate::OptionalSend;
 ///
 /// A `Batch` is a collection that can be created from an iterator,
 /// extended with new elements, iterated over, and viewed as a slice.
+///
+/// It is also made from a `Vec` ([`From<Vec<T>>`]), which should keep the vector's buffer, or
+/// free it for inline storage, rather than copy the elements into another allocation: a follower
+/// appends the entries it received as a batch made this way.
 /// The default implementation is [`InlineBatch`](`super::InlineBatch`),
 /// backed by `SmallVec<[T; 1]>`.
 pub trait Batch<T>:
-    AsRef<[T]> + Extend<T> + IntoIterator<Item = T, IntoIter: OptionalSend> + FromIterator<T> + OptionalSend
+    AsRef<[T]> + Extend<T> + IntoIterator<Item = T, IntoIter: OptionalSend> + FromIterator<T> + From<Vec<T>> + OptionalSend
 {
     /// Creates a `Batch` from any iterable.
     fn of(items: impl IntoIterator<Item = T>) -> Self {
@@ -30,5 +34,11 @@ pub trait Batch<T>:
     }
 }
 
-impl<T, B> Batch<T> for B where B: AsRef<[T]> + Extend<T> + IntoIterator<Item = T, IntoIter: OptionalSend> + FromIterator<T> + OptionalSend
-{}
+impl<T, B> Batch<T> for B where B: AsRef<[T]>
+        + Extend<T>
+        + IntoIterator<Item = T, IntoIter: OptionalSend>
+        + FromIterator<T>
+        + From<Vec<T>>
+        + OptionalSend
+{
+}

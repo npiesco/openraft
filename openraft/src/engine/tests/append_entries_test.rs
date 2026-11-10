@@ -233,7 +233,8 @@ fn test_append_entries_prev_log_id_is_committed() -> anyhow::Result<()> {
             },
             Command::AppendEntries {
                 committed_vote: Vote::new(2, 1).to_committed(),
-                entries: Batch::of([blank_ent::<UTConfig>(2, 1, 2)])
+                entries: Batch::of([blank_ent::<UTConfig>(2, 1, 2)]),
+                owner: None,
             },
         ],
         eng.output.take_commands()
@@ -338,7 +339,8 @@ fn test_append_entries_conflict() -> anyhow::Result<()> {
             },
             Command::AppendEntries {
                 committed_vote: Vote::new(2, 1).to_committed(),
-                entries: Batch::of([EntryOf::<UTConfig>::new_membership(log_id(3, 1, 3), m34())])
+                entries: Batch::of([EntryOf::<UTConfig>::new_membership(log_id(3, 1, 3), m34())]),
+                owner: None,
             },
         ],
         eng.output.take_commands()

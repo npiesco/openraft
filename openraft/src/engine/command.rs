@@ -66,6 +66,12 @@ where
         committed_vote: CommittedVoteOf<C>,
 
         entries: BatchOf<C, C::Entry>,
+
+        /// What accounts for the memory of `entries`, received with them by a follower: declared
+        /// after them and dropped only once [`RaftLogStorage::append`] took them and returned.
+        ///
+        /// [`RaftLogStorage::append`]: crate::storage::RaftLogStorage::append
+        owner: Option<C::EntriesOwner>,
     },
 
     /// Replicate the committed log id to other nodes
@@ -191,6 +197,7 @@ where
             Command::AppendEntries {
                 committed_vote: vote,
                 entries,
+                ..
             } => {
                 write!(
                     f,
@@ -279,7 +286,7 @@ where
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (Command::UpdateIOProgress { when, io_id },        Command::UpdateIOProgress { when: wb, io_id: ab }, )                  => when == wb && io_id == ab,
-            (Command::AppendEntries { committed_vote: vote, entries },    Command::AppendEntries { committed_vote: vb, entries: b }, )               => vote == vb && entries == b,
+            (Command::AppendEntries { committed_vote: vote, entries, .. }, Command::AppendEntries { committed_vote: vb, entries: b, .. }, )      => vote == vb && entries == b,
             (Command::ReplicateCommitted { committed },        Command::ReplicateCommitted { committed: b }, )                       =>  committed == b,
             (Command::BroadcastHeartbeat { session_id, bypass_min_interval },       Command::BroadcastHeartbeat { session_id: sb, bypass_min_interval: ib }, ) => session_id == sb && bypass_min_interval == ib,
             (Command::SaveCommittedAndApply { already_applied: already_committed, upto, },      Command::SaveCommittedAndApply { already_applied: b_committed, upto: b_upto, }, )  => already_committed == b_committed && upto == b_upto,

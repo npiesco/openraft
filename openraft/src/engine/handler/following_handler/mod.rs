@@ -3,7 +3,6 @@ use display_more::DisplaySliceExt;
 
 use crate::RaftState;
 use crate::RaftTypeConfig;
-use crate::batch::Batch;
 use crate::core::sm;
 use crate::engine::Command;
 use crate::engine::Condition;
@@ -21,7 +20,9 @@ use crate::raft_state::IOId;
 use crate::raft_state::LogStateReader;
 use crate::raft_state::io_state::log_io_id::LogIOId;
 use crate::storage::RaftStateMachine;
+use crate::type_config::alias::BatchOf;
 use crate::type_config::alias::CommittedVoteOf;
+use crate::type_config::alias::LogEntriesOf;
 use crate::type_config::alias::LogIdOf;
 use crate::type_config::alias::SmSnapshotOf;
 use crate::type_config::alias::StoredMembershipOf;
@@ -63,7 +64,8 @@ where
     ///
     /// Also clean conflicting entries and update membership state.
     #[tracing::instrument(level = "debug", skip_all)]
-    pub(crate) fn append_entries(&mut self, prev_log_id: Option<LogIdOf<C>>, mut entries: Vec<C::Entry>) {
+    pub(crate) fn append_entries(&mut self, prev_log_id: Option<LogIdOf<C>>, entries: impl Into<LogEntriesOf<C>>) {
+        let mut entries = entries.into();
         tracing::debug!(
             "{}: local last_log_id: {}, request: prev_log_id: {}, entries: {}",
             func_name!(),
@@ -82,7 +84,7 @@ where
         let prev_accepted = self.state.accept_log_io(IOId::new_log_io(self.leader_vote.clone(), last_log_id.clone()));
 
         let l = entries.len();
-        let since = self.state.first_conflicting_index(&entries);
+        let since = self.state.first_conflicting_index(&*entries);
         if since < l {
             // Before appending, if an entry overrides a conflicting one,
             // the entries after it has to be deleted first.
@@ -90,7 +92,9 @@ where
             // Otherwise, the log id with max index makes the committed entry invisible in election.
             self.truncate_logs(entries[since].index());
 
-            let entries = entries.split_off(since);
+            // The entries already present are dropped in place: the rest stay in the buffer they
+            // were received in, with what accounts for it, and nothing is allocated for them.
+            entries.remove_front(since);
             self.do_append_entries(entries);
         } else {
             // No actual IO is needed, but just need to update I/O state,
@@ -145,18 +149,28 @@ where
     ///
     /// Membership config changes are also detected and applied here.
     #[tracing::instrument(level = "debug", skip(self, entries))]
-    pub(crate) fn do_append_entries(&mut self, entries: Vec<C::Entry>) {
-        debug_assert!(!entries.is_empty());
-        debug_assert_eq!(entries[0].index(), self.state.log_ids.last().next_index(),);
-        debug_assert!(Some(entries[0].ref_log_id()) > self.state.log_ids.last_ref());
+    pub(crate) fn do_append_entries(&mut self, entries: impl Into<LogEntriesOf<C>>) {
+        // Appended in the buffer they came in, and with what accounts for it until it is freed.
+        let (entries, owner) = entries.into().into_parts();
+        self.append_batch(BatchOf::<C, C::Entry>::from(entries), owner);
+    }
 
-        self.state.extend_log_ids(entries.iter().map(|ent| ent.ref_log_id()));
-        self.append_membership(entries.iter());
+    /// Appends `entries` as [`do_append_entries`](Self::do_append_entries) does, with `owner`,
+    /// what accounts for their memory, if anything does, kept until the log store took them.
+    pub(crate) fn append_batch(&mut self, entries: BatchOf<C, C::Entry>, owner: Option<C::EntriesOwner>) {
+        let appended = entries.as_ref();
+        debug_assert!(!appended.is_empty());
+        debug_assert_eq!(appended[0].index(), self.state.log_ids.last().next_index(),);
+        debug_assert!(Some(appended[0].ref_log_id()) > self.state.log_ids.last_ref());
+
+        self.state.extend_log_ids(appended.iter().map(|ent| ent.ref_log_id()));
+        self.append_membership(appended.iter());
 
         self.output.push_command(Command::AppendEntries {
             // A follower should always use the node's vote.
             committed_vote: self.leader_vote.clone(),
-            entries: Batch::of(entries),
+            entries,
+            owner,
         });
     }
 

@@ -6,6 +6,7 @@ use validit::Valid;
 use crate::LogIdOptionExt;
 use crate::Membership;
 use crate::RaftTypeConfig;
+use crate::batch::Batch;
 use crate::core::ServerState;
 use crate::core::raft_msg::AppendEntriesTx;
 use crate::engine::Command;
@@ -274,7 +275,8 @@ where
         // The very first log id
         let log_id = LogIdOf::<C>::new(leader_id.to_committed(), 0);
         let entry = C::Entry::new(log_id, payload);
-        self.following_handler().do_append_entries(vec![entry]);
+        // A batch of one, which the default `InlineBatch` holds inline, allocating nothing.
+        self.following_handler().append_batch(Batch::of([entry]), None);
 
         Ok(())
     }

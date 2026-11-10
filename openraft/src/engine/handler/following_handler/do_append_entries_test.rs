@@ -88,7 +88,8 @@ fn test_follower_do_append_entries_no_membership_entries() -> anyhow::Result<()>
             //
             Command::AppendEntries {
                 committed_vote: Vote::new(1, 1).to_committed(),
-                entries: Batch::of([blank_ent::<UTConfig>(3, 1, 4)])
+                entries: Batch::of([blank_ent::<UTConfig>(3, 1, 4)]),
+                owner: None,
             },
         ],
         eng.output.take_commands()
@@ -144,7 +145,8 @@ fn test_follower_do_append_entries_one_membership_entry() -> anyhow::Result<()> 
                     log_id: log_id(3, 1, 5),
                     payload: EntryPayload::<u64, u64, ()>::Membership(m34()),
                 },
-            ])
+            ]),
+            owner: None,
         },],
         eng.output.take_commands()
     );
@@ -201,7 +203,8 @@ fn test_follower_do_append_entries_three_membership_entries() -> anyhow::Result<
                 EntryOf::<UTConfig>::new_membership(log_id(3, 1, 5), m01()),
                 EntryOf::<UTConfig>::new_membership(log_id(4, 1, 6), m34()),
                 EntryOf::<UTConfig>::new_membership(log_id(4, 1, 7), m45()),
-            ])
+            ]),
+            owner: None,
         },],
         eng.output.take_commands()
     );
