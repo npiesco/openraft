@@ -38,11 +38,11 @@ use stream_state::StreamState;
 use crate::OptionalSend;
 use crate::RaftNetworkFactory;
 use crate::RaftTypeConfig;
-use crate::async_runtime::Mutex;
 use crate::async_runtime::Select2;
 use crate::async_runtime::watch::Watch;
 use crate::async_runtime::watch::WatchReceiver;
 use crate::base::BoxStream;
+use crate::base::slot_lock::SlotLock;
 use crate::core::notification::Notification;
 use crate::display_ext::display_instant::DisplayInstantExt;
 use crate::errors::RPCError;
@@ -71,7 +71,6 @@ use crate::storage::RaftLogStorage;
 use crate::type_config::TypeConfigExt;
 use crate::type_config::alias::InstantOf;
 use crate::type_config::alias::LogIdOf;
-use crate::type_config::alias::MutexOf;
 use crate::type_config::alias::WatchOf;
 use crate::type_config::alias::WatchReceiverOf;
 use crate::type_config::async_runtime::mpsc::MpscSender;
@@ -125,12 +124,13 @@ where
 {
     let replicate = WatchOf::<C>::block_bytes::<Replicate<C>>()?;
     let signals = WatchOf::<C>::block_bytes::<()>()?.checked_mul(2)?;
-    let shared = arc_block_bytes::<MutexOf<C, StreamState<C, LS>>>() + BackoffState::block_bytes();
+    let shared = arc_block_bytes::<SlotLock<StreamState<C, LS>>>() + BackoffState::block_bytes();
     let session = InflightAppendQueue::<C>::block_bytes()
-        + arc_block_bytes::<MutexOf<C, Option<ReplicationClosed>>>()
+        + arc_block_bytes::<SlotLock<Option<ReplicationClosed>>>()
         + unfold_bytes::<StreamContext<C, LS>, _, _>(ReplicationCore::<C, NF, LS>::next_append_request)
         + <NF::Network as NetStreamAppend<C>>::stream_append_bytes();
-    replicate.checked_add(signals)?.checked_add(shared)?.checked_add(session)
+    let sleep = sleep_bytes::<C>()?;
+    replicate.checked_add(signals)?.checked_add(shared)?.checked_add(session)?.checked_add(sleep)
 }
 
 /// The error rank that a stream session adds when the target accepted none of the entries it sent.
@@ -155,7 +155,7 @@ where
     replication_context: ReplicationContext<C>,
 
     /// State shared with the request stream generator, protected by a mutex.
-    stream_state: Arc<MutexOf<C, StreamState<C, LS>>>,
+    stream_state: Arc<SlotLock<StreamState<C, LS>>>,
 
     /// A channel for receiving events from the RaftCore and snapshot transmitting task.
     event_watcher: EventWatcher<C>,
@@ -178,7 +178,7 @@ where
 
     /// A fatal error the stream of requests being sent found, made once with the task and taken
     /// as each stream ends.
-    fatal_error: Arc<MutexOf<C, Option<ReplicationClosed>>>,
+    fatal_error: Arc<SlotLock<Option<ReplicationClosed>>>,
 
     /// Backoff state for rate-limiting retries on persistent errors.
     ///
@@ -222,7 +222,7 @@ where
 
         Self {
             replication_context: replication_context.clone(),
-            stream_state: Arc::new(C::mutex(StreamState {
+            stream_state: Arc::new(SlotLock::new(StreamState {
                 replication_context,
                 event_watcher: event_watcher.clone(),
                 log_reader,
@@ -235,7 +235,7 @@ where
             network: Some(network),
             replication_progress: progress,
             inflight_queue: InflightAppendQueue::new(),
-            fatal_error: Arc::new(C::mutex(None)),
+            fatal_error: Arc::new(SlotLock::new(None)),
             backoff_state,
             next_action: None,
         }
@@ -451,7 +451,7 @@ where
     }
 
     async fn take_stream_fatal_error(
-        fatal_error: &Arc<MutexOf<C, Option<ReplicationClosed>>>,
+        fatal_error: &Arc<SlotLock<Option<ReplicationClosed>>>,
     ) -> Option<ReplicationClosed> {
         let mut fatal_error = fatal_error.lock().await;
         fatal_error.take()
