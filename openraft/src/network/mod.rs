@@ -47,6 +47,7 @@ pub use rpc_type::RPCTypes;
 pub use snapshot_trait::NetSnapshot;
 pub use stream_append_trait::NetStreamAppend;
 pub use stream_append_trait::stream_append_sequential;
+pub use stream_append_trait::stream_append_sequential_bytes;
 pub use transfer_leader_trait::NetTransferLeader;
 pub use v2::RaftNetworkV2;
 pub use vote_trait::NetVote;

@@ -2,6 +2,7 @@
 
 use futures_util::Stream;
 use futures_util::StreamExt;
+use openraft_macros::since;
 
 use crate::OptionalSend;
 use crate::OptionalSync;
@@ -11,6 +12,7 @@ use crate::base::BoxStream;
 use crate::errors::RPCError;
 use crate::network::NetAppend;
 use crate::network::RPCOption;
+use crate::proposer::funding::unfold_bytes;
 use crate::raft::AppendEntriesRequest;
 use crate::raft::StreamAppendResult;
 
@@ -67,11 +69,25 @@ where C: RaftTypeConfig
     ) -> BoxFuture<'s, Result<BoxStream<'s, Result<StreamAppendResult<C>, RPCError<C>>>, RPCError<C>>>
     where
         S: Stream<Item = AppendEntriesRequest<C>> + OptionalSend + Unpin + 'static;
+
+    /// The bytes [`stream_append`](Self::stream_append) allocates for one stream of the requests
+    /// a replication stream sends, a `BoxStream<'static, AppendEntriesRequest<C>>`, freed with
+    /// what it returns: charged with the replication stream before its task is spawned, and held
+    /// until the task is freed.
+    ///
+    /// This default is for an implementation that allocates nothing per stream. One built on
+    /// [`stream_append_sequential`] returns [`stream_append_sequential_bytes`].
+    #[since(version = "0.10.0")]
+    fn stream_append_bytes() -> usize {
+        0
+    }
 }
 
 /// Default sequential implementation of stream_append.
 ///
 /// This processes requests one at a time: send request, wait for response, repeat.
+///
+/// It allocates, per stream, the boxes [`stream_append_sequential_bytes`] tells.
 pub fn stream_append_sequential<'s, C, N, S>(
     network: &'s mut N,
     input: S,
@@ -82,47 +98,68 @@ where
     N: NetAppend<C> + ?Sized,
     S: Stream<Item = AppendEntriesRequest<C>> + OptionalSend + Unpin + 'static,
 {
-    let fu = async move {
-        let strm = futures_util::stream::unfold(Some((network, input)), move |state| {
-            let option = option.clone();
-            async move {
-                let (network, mut input) = state?;
+    let strm: BoxStream<'s, _> = Box::pin(futures_util::stream::unfold(
+        Some((network, input, option)),
+        next_sequential::<C, N, S>,
+    ));
+    Box::pin(std::future::ready(Ok(strm)))
+}
 
-                let req = input.next().await?;
+/// The bytes [`stream_append_sequential`] allocates for one stream of requests of type `S`: the
+/// box of its response stream and that of the future that returns it, both freed with them.
+#[since(version = "0.10.0")]
+pub fn stream_append_sequential_bytes<C, N, S>() -> usize
+where
+    C: RaftTypeConfig,
+    N: NetAppend<C> + ?Sized,
+    S: Stream<Item = AppendEntriesRequest<C>> + OptionalSend + Unpin + 'static,
+{
+    let stream = unfold_bytes::<Sequential<'static, N, S>, _, _>(next_sequential::<C, N, S>);
+    stream + size_of::<std::future::Ready<Result<BoxStream<'static, Answer<C>>, RPCError<C>>>>()
+}
 
-                let range = req.log_id_range();
+/// The response to one AppendEntries request of a stream.
+type Answer<C> = Result<StreamAppendResult<C>, RPCError<C>>;
 
-                let result = network.append_entries(req, option).await;
+/// What [`stream_append_sequential`] sends the rest of a stream with, `None` once it stopped.
+type Sequential<'s, N, S> = Option<(&'s mut N, S, RPCOption)>;
 
-                match result {
-                    Ok(resp) => {
-                        let partial_success = resp.get_partial_success().cloned();
+/// The next response of [`stream_append_sequential`], with what sends the rest.
+async fn next_sequential<'s, C, N, S>(state: Sequential<'s, N, S>) -> Option<(Answer<C>, Sequential<'s, N, S>)>
+where
+    C: RaftTypeConfig,
+    N: NetAppend<C> + ?Sized,
+    S: Stream<Item = AppendEntriesRequest<C>> + Unpin,
+{
+    let (network, mut input, option) = state?;
 
-                        let stream_result = resp.into_stream_result(range.prev, range.last.clone());
-                        let is_err = stream_result.is_err();
-                        let next_state = if is_err {
-                            None
-                        } else if let Some(partial) = partial_success {
-                            if partial == range.last {
-                                Some((network, input))
-                            } else {
-                                // If the request is only partially finished, pipeline should be stopped
-                                None
-                            }
-                        } else {
-                            // full success
-                            Some((network, input))
-                        };
-                        Some((Ok(stream_result), next_state))
-                    }
-                    Err(e) => Some((Err(e), None)),
+    let req = input.next().await?;
+
+    let range = req.log_id_range();
+
+    let result = network.append_entries(req, option.clone()).await;
+
+    match result {
+        Ok(resp) => {
+            let partial_success = resp.get_partial_success().cloned();
+
+            let stream_result = resp.into_stream_result(range.prev, range.last.clone());
+            let is_err = stream_result.is_err();
+            let next_state = if is_err {
+                None
+            } else if let Some(partial) = partial_success {
+                if partial == range.last {
+                    Some((network, input, option))
+                } else {
+                    // If the request is only partially finished, pipeline should be stopped
+                    None
                 }
-            }
-        });
-
-        let strm: BoxStream<'s, _> = Box::pin(strm);
-        Ok(strm)
-    };
-
-    Box::pin(fu)
+            } else {
+                // full success
+                Some((network, input, option))
+            };
+            Some((Ok(stream_result), next_state))
+        }
+        Err(e) => Some((Err(e), None)),
+    }
 }

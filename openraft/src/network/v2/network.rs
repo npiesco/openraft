@@ -18,6 +18,7 @@ use crate::network::Backoff;
 use crate::network::NetAppend;
 use crate::network::RPCOption;
 use crate::network::stream_append_sequential;
+use crate::network::stream_append_sequential_bytes;
 use crate::raft::AppendEntriesRequest;
 use crate::raft::AppendEntriesResponse;
 use crate::raft::SnapshotResponse;
@@ -153,6 +154,17 @@ where C: RaftTypeConfig
         S: Stream<Item = AppendEntriesRequest<C>> + OptionalSend + Unpin + 'static,
     {
         stream_append_sequential(self, input, option)
+    }
+
+    /// The bytes [`stream_append`](Self::stream_append) allocates for one stream of the requests
+    /// a replication stream sends, as [`NetStreamAppend::stream_append_bytes`] tells: by default,
+    /// what [`stream_append_sequential`] allocates. An implementation that overrides
+    /// `stream_append` returns what its own allocates.
+    ///
+    /// [`NetStreamAppend::stream_append_bytes`]: crate::network::NetStreamAppend::stream_append_bytes
+    #[since(version = "0.10.0")]
+    fn stream_append_bytes() -> usize {
+        stream_append_sequential_bytes::<C, Self, BoxStream<'static, AppendEntriesRequest<C>>>()
     }
 
     /// Send a RequestVote RPC to the target.
@@ -360,5 +372,9 @@ where
         S: Stream<Item = AppendEntriesRequest<C>> + OptionalSend + Unpin + 'static,
     {
         RaftNetworkV2::stream_append(self, input, option)
+    }
+
+    fn stream_append_bytes() -> usize {
+        <T as RaftNetworkV2<C>>::stream_append_bytes()
     }
 }

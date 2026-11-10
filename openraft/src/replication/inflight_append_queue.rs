@@ -5,6 +5,7 @@ use std::sync::Mutex;
 use display_more::DisplayOptionExt;
 
 use crate::RaftTypeConfig;
+use crate::proposer::funding::arc_block_bytes;
 use crate::replication::inflight_append::InflightAppend;
 use crate::type_config::alias::InstantOf;
 use crate::type_config::alias::LogIdOf;
@@ -25,13 +26,33 @@ where C: RaftTypeConfig
 impl<C> InflightAppendQueue<C>
 where C: RaftTypeConfig
 {
+    /// The most requests it holds in flight: it never grows past them.
+    pub(crate) const CAPACITY: usize = 32;
+
     pub(crate) fn new() -> Self {
         Self {
-            queue: Arc::new(Mutex::new(VecDeque::with_capacity(32))),
+            queue: Arc::new(Mutex::new(VecDeque::with_capacity(Self::CAPACITY))),
         }
     }
 
-    /// Records a new in-flight AppendEntries request.
+    /// The bytes it allocates, all of them made by [`new`](Self::new): its shared block and its
+    /// buffer, freed with the last of its clones.
+    pub(crate) const fn block_bytes() -> usize {
+        arc_block_bytes::<Mutex<VecDeque<InflightAppend<C>>>>() + Self::CAPACITY * size_of::<InflightAppend<C>>()
+    }
+
+    /// Whether another request has room without growing it.
+    pub(crate) fn has_room(&self) -> bool {
+        self.queue.lock().unwrap().len() < Self::CAPACITY
+    }
+
+    /// Forgets every request, keeping its buffer.
+    pub(crate) fn clear(&self) {
+        self.queue.lock().unwrap().clear();
+    }
+
+    /// Records a new in-flight AppendEntries request, which must have room (see
+    /// [`has_room`](Self::has_room)).
     pub(crate) fn push(&self, prev_log_id: Option<LogIdOf<C>>, last_log_id: Option<LogIdOf<C>>) {
         let mut q = self.queue.lock().unwrap();
         let inflight = InflightAppend::new(prev_log_id, last_log_id);
@@ -295,5 +316,26 @@ mod tests {
         let deque = q.queue.lock().unwrap();
         assert_eq!(deque.len(), 1);
         assert_eq!(deque[0].last_log_id, Some(log_id(1, 1, 5)));
+    }
+
+    /// It holds requests in flight up to the buffer it is made with, and has no room past them:
+    /// it never grows, and cleared, it keeps the buffer for the next stream.
+    #[test]
+    fn test_room_is_bounded_by_the_buffer_it_is_made_with() {
+        let q = InflightAppendQueue::<UTConfig>::new();
+        let capacity = q.queue.lock().unwrap().capacity();
+        assert_eq!(InflightAppendQueue::<UTConfig>::CAPACITY, capacity);
+
+        for i in 0..InflightAppendQueue::<UTConfig>::CAPACITY as u64 {
+            assert!(q.has_room());
+            q.push(Some(log_id(1, 1, i)), Some(log_id(1, 1, i + 1)));
+        }
+        assert!(!q.has_room());
+        assert_eq!(capacity, q.queue.lock().unwrap().capacity());
+
+        q.clear();
+        assert!(q.has_room());
+        assert!(q.is_empty());
+        assert_eq!(capacity, q.queue.lock().unwrap().capacity());
     }
 }

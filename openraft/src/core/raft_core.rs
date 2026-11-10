@@ -1218,7 +1218,7 @@ where
             return None;
         };
 
-        let mut task = match TaskCharge::<C, _>::take(&self.engine.config.funding, stream_parts_bytes::<C, LS>) {
+        let mut task = match TaskCharge::<C, _>::take(&self.engine.config.funding, stream_parts_bytes::<C, NF, LS>) {
             Ok(task) => task,
             Err(Unfunded) => {
                 tracing::warn!(

@@ -55,6 +55,7 @@ use crate::network::RPCOption;
 use crate::progress::inflight_id::InflightId;
 use crate::proposer::funding::arc_block_bytes;
 use crate::proposer::funding::spawned_bytes;
+use crate::proposer::funding::unfold_bytes;
 use crate::raft::AppendEntriesRequest;
 use crate::raft::StreamAppendError;
 use crate::raft::StreamAppendResult;
@@ -93,7 +94,8 @@ where
     NF: RaftNetworkFactory<C>,
     LS: RaftLogStorage<C>,
 {
-    instrumented_task_bytes::<C, _, _>(ReplicationCore::<C, NF, LS>::main)?.checked_add(stream_parts_bytes::<C, LS>()?)
+    instrumented_task_bytes::<C, _, _>(ReplicationCore::<C, NF, LS>::main)?
+        .checked_add(stream_parts_bytes::<C, NF, LS>()?)
 }
 
 /// What the runtime charges a task running, in a span, the future `task` makes, as
@@ -108,17 +110,25 @@ where
 }
 
 /// What a replication stream holds besides its task: the blocks of the channels that send it what
-/// to replicate, end its backoff and stop it, and those of the state its task shares with the
-/// requests it streams and of its backoff, freed with its task.
-pub(crate) fn stream_parts_bytes<C, LS>() -> Option<usize>
+/// to replicate, end its backoff and stop it, those of the state its task shares with the requests
+/// it streams and of its backoff, and what one stream of requests at a time allocates: the queue
+/// of requests in flight and the slot of a fatal error its task makes once, and the box of the
+/// request stream and what [`NetStreamAppend::stream_append_bytes`] allocates for it, freed before
+/// the next stream is made. All of it is freed with its task.
+pub(crate) fn stream_parts_bytes<C, NF, LS>() -> Option<usize>
 where
     C: RaftTypeConfig,
+    NF: RaftNetworkFactory<C>,
     LS: RaftLogStorage<C>,
 {
     let replicate = WatchOf::<C>::block_bytes::<Replicate<C>>()?;
     let signals = WatchOf::<C>::block_bytes::<()>()?.checked_mul(2)?;
     let shared = arc_block_bytes::<MutexOf<C, StreamState<C, LS>>>() + BackoffState::block_bytes();
-    replicate.checked_add(signals)?.checked_add(shared)
+    let session = InflightAppendQueue::<C>::block_bytes()
+        + arc_block_bytes::<MutexOf<C, Option<ReplicationClosed>>>()
+        + unfold_bytes::<StreamContext<C, LS>, _, _>(ReplicationCore::<C, NF, LS>::next_append_request)
+        + <NF::Network as NetStreamAppend<C>>::stream_append_bytes();
+    replicate.checked_add(signals)?.checked_add(shared)?.checked_add(session)
 }
 
 /// The error rank that a stream session adds when the target accepted none of the entries it sent.
@@ -159,6 +169,14 @@ where
 
     /// The log replication state tracking progress and matching logs for the follower.
     replication_progress: ReplicationProgress<C>,
+
+    /// The requests in flight of the stream of requests being sent, made once with the task and
+    /// cleared for each stream.
+    inflight_queue: InflightAppendQueue<C>,
+
+    /// A fatal error the stream of requests being sent found, made once with the task and taken
+    /// as each stream ends.
+    fatal_error: Arc<MutexOf<C, Option<ReplicationClosed>>>,
 
     /// Backoff state for rate-limiting retries on persistent errors.
     ///
@@ -214,12 +232,15 @@ where
             event_watcher,
             network: Some(network),
             replication_progress: progress,
+            inflight_queue: InflightAppendQueue::new(),
+            fatal_error: Arc::new(C::mutex(None)),
             backoff_state,
             next_action: None,
         }
     }
 
-    /// Creates a stream of AppendEntries requests from the given context.
+    /// Creates a stream of AppendEntries requests from the given context, its box charged with
+    /// the task (see [`stream_parts_bytes`]).
     fn new_request_stream(stream_context: StreamContext<C, LS>) -> BoxStream<'static, AppendEntriesRequest<C>> {
         let strm = futures_util::stream::unfold(stream_context, Self::next_append_request);
         Box::pin(strm)
@@ -231,6 +252,12 @@ where
     async fn next_append_request(
         stream_context: StreamContext<C, LS>,
     ) -> Option<(AppendEntriesRequest<C>, StreamContext<C, LS>)> {
+        // With as many requests in flight as its queue holds, the stream ends: it is sent again,
+        // after them, as the next stream.
+        if !stream_context.inflight_append_queue.has_room() {
+            return None;
+        }
+
         let res = {
             let mut state = stream_context.stream_state.as_ref().lock().await;
             state.next_request().await
@@ -359,8 +386,9 @@ where
             stream_state.inflight_id = self.inflight_id;
         }
 
-        let inflight_queue = InflightAppendQueue::new();
-        let fatal_error = Arc::new(C::mutex(None));
+        self.inflight_queue.clear();
+        let inflight_queue = self.inflight_queue.clone();
+        let fatal_error = self.fatal_error.clone();
 
         let stream_context = StreamContext {
             stream_state: self.stream_state.clone(),

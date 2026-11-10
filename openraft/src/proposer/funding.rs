@@ -345,6 +345,16 @@ where
     spawned_bytes::<C, T>()
 }
 
+/// The bytes the box of a stream `futures_util::stream::unfold(init, step)` makes allocates,
+/// its state of type `T`: the stream's type named by the function `step`.
+pub(crate) fn unfold_bytes<T, F, Fut>(_step: F) -> usize
+where
+    F: FnMut(T) -> Fut,
+    Fut: Future,
+{
+    size_of::<futures_util::stream::Unfold<T, F, Fut>>()
+}
+
 /// What the runtime charges a task running `T` as [`TaskCharge::spawn`] spawns it, holding what
 /// is left of its charge after it.
 pub(crate) fn spawned_bytes<C, T>() -> Option<usize>
