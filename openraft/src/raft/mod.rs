@@ -136,6 +136,7 @@ use crate::metrics::RaftServerMetrics;
 use crate::metrics::Wait;
 use crate::metrics::WaitError;
 use crate::network::NetSnapshot;
+use crate::proposer::funding::Funding;
 use crate::raft::raft_inner::RaftInner;
 use crate::raft::responder::ProgressResponder;
 pub use crate::raft::runtime_config_handle::RuntimeConfigHandle;
@@ -600,6 +601,9 @@ where
             let rx_server_metrics = rx_server_metrics.clone();
 
             Box::new(move |inner: &RaftInner<C>| {
+                let mut engine = engine;
+                engine.config.funding = Funding::new(inner.funder.get().cloned());
+
                 let tick_tx = tx_notify.clone();
                 let sm_handle = worker::Worker::spawn(
                     id.clone(),
@@ -720,8 +724,15 @@ where
     }
 
     /// [`run`](Self::run), with what the node allocates for its owner charged to `funder` before
-    /// it is made: the channel each call waits on for the core's answer. A call whose channel
-    /// `funder` refuses is answered with [`Unfunded`], nothing sent.
+    /// it is made: the channel each call waits on for the core's answer, and the vote tracker of
+    /// each campaign and the progress of each Leader it builds. A call whose channel `funder`
+    /// refuses is answered with [`Unfunded`], nothing sent; a campaign refused is skipped, a
+    /// Leader refused is not led (its vote is demoted in memory and the node campaigns again),
+    /// and a membership whose Leader progress is refused is answered with
+    /// [`ChangeMembershipError::MembershipRefused`], nothing written. Charges for proposer state
+    /// are sized by [`proposer_state_bytes`](crate::proposer_state_bytes).
+    ///
+    /// [`ChangeMembershipError::MembershipRefused`]: crate::errors::ChangeMembershipError::MembershipRefused
     ///
     /// Like [`run`](Self::run), it has no effect on a node already running or stopped: the node
     /// keeps the funding it was started with.

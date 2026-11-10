@@ -6,6 +6,7 @@ use crate::AsyncRuntime;
 use crate::Config;
 use crate::RaftTypeConfig;
 use crate::engine::time_state;
+use crate::proposer::funding::Funding;
 use crate::type_config::alias::AsyncRuntimeOf;
 
 /// Config for Engine
@@ -38,6 +39,9 @@ pub(crate) struct EngineConfig<C: RaftTypeConfig> {
 
     /// Duration of each alternating heartbeat phase after the Leader lease expires.
     pub(crate) quorum_loss_probe_interval: Option<Duration>,
+
+    /// What the proposer state (Candidates and Leaders) is charged to before it is allocated.
+    pub(crate) funding: Funding,
 }
 
 impl<C> EngineConfig<C>
@@ -61,6 +65,7 @@ where C: RaftTypeConfig
 
             enable_leader_restore: config.enable_leader_restore(),
             quorum_loss_probe_interval: config.quorum_loss_probe_interval.map(Duration::from_millis),
+            funding: Funding::default(),
         };
         this.resample_election_timeout();
         this
@@ -79,6 +84,7 @@ where C: RaftTypeConfig
             timer_config: time_state::Config::default(),
             enable_leader_restore: true,
             quorum_loss_probe_interval: None,
+            funding: Funding::default(),
         }
     }
 

@@ -8,6 +8,7 @@ use crate::Membership;
 use crate::RaftState;
 use crate::RaftTypeConfig;
 use crate::ServerState;
+use crate::async_runtime::Charge;
 use crate::engine::Command;
 use crate::engine::EngineConfig;
 use crate::engine::EngineOutput;
@@ -24,6 +25,7 @@ use crate::progress::stream_id::StreamId;
 use crate::proposer::Leader;
 use crate::proposer::LeaderQuorumSet;
 use crate::proposer::SendStamp;
+use crate::proposer::funding;
 use crate::raft_state::LogStateReader;
 use crate::raft_state::io_state::log_io_id::LogIOId;
 use crate::replication::replicate::Replicate;
@@ -89,8 +91,14 @@ where
     /// Append a new membership and update related state such as replication streams.
     ///
     /// It is called by the leader when a new membership log is appended to the log store.
+    /// `funded` is what the rebuild of the Leader's progress for `m` was charged before it.
     #[tracing::instrument(level = "debug", skip_all)]
-    pub(crate) fn append_membership(&mut self, log_id: &LogIdOf<C>, m: &Membership<C::NodeId, C::Node>) {
+    pub(crate) fn append_membership(
+        &mut self,
+        log_id: &LogIdOf<C>,
+        m: &Membership<C::NodeId, C::Node>,
+        funded: Option<Charge>,
+    ) {
         tracing::debug!("update effective membership: log_id:{} {}", log_id, m);
 
         debug_assert!(
@@ -113,7 +121,7 @@ where
         // A leader that is removed will shut down replications when this membership log is
         // committed.
 
-        self.rebuild_progresses();
+        self.rebuild_progresses(funded);
         self.rebuild_replication_streams(false);
         self.initiate_replication();
     }
@@ -121,8 +129,13 @@ where
     /// Rebuild leader's replication progress to reflect replication changes.
     ///
     /// E.g., when adding/removing a follower/learner.
+    ///
+    /// `funded` was charged [`rebuild_state_bytes`](funding::rebuild_state_bytes) for it before
+    /// it: the Leader keeps the part its rebuilt progress is charged in place of its own charge,
+    /// which is credited back only once its old progress is freed, and the rest, what the rebuild
+    /// freed, is credited back as it returns.
     #[tracing::instrument(level = "debug", skip_all)]
-    pub(crate) fn rebuild_progresses(&mut self) {
+    pub(crate) fn rebuild_progresses(&mut self, mut funded: Option<Charge>) {
         let em = self.state.membership_state.effective();
 
         let learner_ids = em.learner_ids().collect::<Vec<_>>();
@@ -153,6 +166,12 @@ where
                 learner_ids,
                 IdVal::new_default,
             ));
+        }
+
+        if let Some(funded) = funded.as_mut() {
+            let kept = funded.split(funding::leader_state_bytes::<C>(em.membership()));
+            debug_assert!(kept.is_some(), "a rebuild is charged its rebuilt progress");
+            self.leader.charge = kept;
         }
     }
 

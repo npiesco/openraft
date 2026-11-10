@@ -33,7 +33,7 @@ fn eng() -> Engine<UTConfig> {
     eng.state
         .membership_state
         .set_effective(StoredMembershipOf::<UTConfig>::new(Some(log_id(1, 1, 1)), m01()));
-    eng.new_candidate(*eng.state.vote_ref());
+    eng.new_candidate(*eng.state.vote_ref()).unwrap();
     eng.output.take_commands();
 
     eng

@@ -15,10 +15,13 @@ use crate::engine::testing::UTConfig;
 use crate::engine::testing::log_id;
 use crate::entry::RaftEntry;
 use crate::entry::payload::EntryPayload;
+use crate::errors::Unfunded;
 use crate::log_id_range::LogIdRange;
 use crate::progress::entry::ProgressEntry;
 use crate::progress::inflight_id::InflightId;
 use crate::progress::stream_id::StreamId;
+use crate::proposer::funding::leader_state_bytes;
+use crate::proposer::funding::testing::Limit;
 use crate::raft_state::IOId;
 use crate::raft_state::LogStateReader;
 use crate::replication::replicate::Replicate;
@@ -78,7 +81,7 @@ fn test_leader_append_entries_empty() -> anyhow::Result<()> {
     let mut eng = eng();
     eng.output.take_commands();
 
-    let got = eng.try_leader_handler()?.leader_append_entries([]);
+    let got = eng.try_leader_handler()?.leader_append_entries([], None);
 
     assert_eq!(None, got, "empty entries should return None");
     assert_eq!(
@@ -112,11 +115,9 @@ fn test_leader_append_entries_normal() -> anyhow::Result<()> {
     let mut eng = eng();
     eng.output.take_commands();
 
-    let got = eng.try_leader_handler()?.leader_append_entries([
-        EntryPayload::Blank,
-        EntryPayload::Blank,
-        EntryPayload::Blank,
-    ]);
+    let got = eng
+        .try_leader_handler()?
+        .leader_append_entries([EntryPayload::Blank, EntryPayload::Blank, EntryPayload::Blank], None);
 
     assert_eq!(
         Some(LeaderLogIds::new(committed_leader_id(3, 1), 4, 6)),
@@ -179,11 +180,9 @@ fn test_leader_append_entries_single_node_leader() -> anyhow::Result<()> {
 
     eng.output.clear_commands();
 
-    let got = eng.try_leader_handler()?.leader_append_entries([
-        EntryPayload::Blank,
-        EntryPayload::Blank,
-        EntryPayload::Blank,
-    ]);
+    let got = eng
+        .try_leader_handler()?
+        .leader_append_entries([EntryPayload::Blank, EntryPayload::Blank, EntryPayload::Blank], None);
 
     assert_eq!(
         Some(LeaderLogIds::new(committed_leader_id(3, 1), 4, 6)),
@@ -238,11 +237,14 @@ fn test_leader_append_entries_with_membership_log() -> anyhow::Result<()> {
 
     eng.output.clear_commands();
 
-    let got = eng.try_leader_handler()?.leader_append_entries([
-        EntryPayload::Blank,
-        EntryPayload::Membership(m1_2()),
-        EntryPayload::Blank,
-    ]);
+    let got = eng.try_leader_handler()?.leader_append_entries(
+        [
+            EntryPayload::Blank,
+            EntryPayload::Membership(m1_2()),
+            EntryPayload::Blank,
+        ],
+        None,
+    );
 
     assert_eq!(
         Some(LeaderLogIds::new(committed_leader_id(3, 1), 4, 6)),
@@ -298,6 +300,50 @@ fn test_leader_append_entries_with_membership_log() -> anyhow::Result<()> {
         ],
         eng.output.take_commands()
     );
+
+    Ok(())
+}
+
+#[test]
+fn test_leader_append_membership_refused_its_funding() -> anyhow::Result<()> {
+    let limit = Limit::new(0);
+    let mut eng = eng();
+    eng.config.funding = limit.funding();
+
+    let lh = eng.try_leader_handler()?;
+    assert!(
+        matches!(lh.fund_append(&[EntryPayload::Blank]), Ok(None)),
+        "no membership, no rebuild"
+    );
+    assert!(matches!(
+        lh.fund_append(&[EntryPayload::Blank, EntryPayload::Membership(m1_2())]),
+        Err(Unfunded)
+    ));
+    assert_eq!(0, limit.held());
+
+    Ok(())
+}
+
+#[test]
+fn test_leader_append_membership_keeps_its_rebuilt_progress_charge() -> anyhow::Result<()> {
+    let limit = Limit::new(usize::MAX);
+    let mut eng = eng();
+    eng.config.funding = limit.funding();
+
+    let payloads = [EntryPayload::Blank, EntryPayload::Membership(m1_2())];
+    let mut lh = eng.try_leader_handler()?;
+    let funded = lh.fund_append(&payloads)?;
+    assert!(funded.is_some());
+    lh.leader_append_entries(payloads, funded);
+
+    assert_eq!(
+        leader_state_bytes::<UTConfig>(&m1_2()),
+        limit.held(),
+        "the Leader keeps what its rebuilt progress is charged; the rest of the rebuild is credited back"
+    );
+
+    eng.leader = None;
+    assert_eq!(0, limit.held());
 
     Ok(())
 }

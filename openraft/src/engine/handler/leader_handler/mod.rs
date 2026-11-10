@@ -2,14 +2,18 @@ use std::time::Duration;
 
 use crate::RaftState;
 use crate::RaftTypeConfig;
+use crate::async_runtime::Charge;
 use crate::engine::Command;
 use crate::engine::EngineConfig;
 use crate::engine::EngineOutput;
 use crate::engine::handler::replication_handler::ReplicationHandler;
 use crate::engine::leader_log_ids::LeaderLogIds;
 use crate::entry::RaftEntry;
+use crate::entry::RaftPayload;
+use crate::errors::Unfunded;
 use crate::proposer::Leader;
 use crate::proposer::LeaderQuorumSet;
+use crate::proposer::funding;
 use crate::raft::linearizable_read::ReadLogId;
 use crate::raft::message::TransferLeaderRequest;
 use crate::raft_state::IOId;
@@ -71,17 +75,32 @@ where
         self.leader.is_lease_valid(self.config.timer_config.leader_lease)
     }
 
+    /// Charge what appending `payloads` allocates for this Leader's progress, before any of it
+    /// is: the rebuild of its progress for the membership one of them carries, if any. Refused,
+    /// nothing is charged, and they must not be appended.
+    pub(crate) fn fund_append(&self, payloads: &[PayloadOf<C>]) -> Result<Option<Charge>, Unfunded> {
+        let Some(membership) = payloads.iter().find_map(|payload| payload.get_membership()) else {
+            return Ok(None);
+        };
+        let tracked = self.leader.progress.iter().len();
+        self.config.funding.charge(funding::rebuild_state_bytes::<C>(tracked, &membership))
+    }
+
     /// Append new log entries by a leader.
     ///
     /// Also Update effective membership if the payload contains
     /// membership config.
     ///
     /// If there is a membership config log entry, the caller has to guarantee the previous one is
-    /// committed.
+    /// committed, and `funded` is what [`fund_append`](Self::fund_append) charged for them.
     ///
     /// TODO(xp): if vote indicates this node is not the leader, refuse append
-    #[tracing::instrument(level = "debug", skip(self, payloads))]
-    pub(crate) fn leader_append_entries<I>(&mut self, payloads: I) -> Option<LeaderLogIds<CommittedLeaderIdOf<C>>>
+    #[tracing::instrument(level = "debug", skip(self, payloads, funded))]
+    pub(crate) fn leader_append_entries<I>(
+        &mut self,
+        payloads: I,
+        funded: Option<Charge>,
+    ) -> Option<LeaderLogIds<CommittedLeaderIdOf<C>>>
     where I: IntoIterator<Item = PayloadOf<C>> + AsRef<[PayloadOf<C>]> {
         let log_ids = self.leader.assign_log_ids(payloads.as_ref().len())?;
 
@@ -123,7 +142,7 @@ where
         // But we only need to commit in the new membership config.
         // Because any quorum in the new one intersects with one in the previous membership config.
         if let Some((log_id, m)) = membership_entry {
-            rh.append_membership(&log_id, &m);
+            rh.append_membership(&log_id, &m, funded);
         }
 
         rh.initiate_replication();

@@ -7,6 +7,7 @@ use validit::Validate;
 
 use crate::RaftTypeConfig;
 use crate::ServerState;
+use crate::async_runtime::Charge;
 use crate::engine::LogIdList;
 use crate::errors::ForwardToLeader;
 use crate::log_id::raft_log_id::RaftLogId;
@@ -462,7 +463,9 @@ where C: RaftTypeConfig
     /// for example, node-1 elects node-2 as a Leader, node-2 will become a Leader when receives the
     /// vote.
     /// A Leader established with election using the state in `Engine.candidate`.
-    pub(crate) fn new_leader(&mut self) -> Leader<C, LeaderQuorumSet<C>> {
+    ///
+    /// `charge` is what its progress was charged before it is built.
+    pub(crate) fn new_leader(&mut self, charge: Option<Charge>) -> Leader<C, LeaderQuorumSet<C>> {
         let em = self.membership_state.effective().membership();
 
         let last_leader_log_ids = self.log_ids.by_last_leader();
@@ -473,6 +476,7 @@ where C: RaftTypeConfig
             em.learner_ids(),
             last_leader_log_ids,
             self.progress_id_gen.clone(),
+            charge,
         )
     }
 

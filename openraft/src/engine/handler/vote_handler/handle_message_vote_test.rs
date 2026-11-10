@@ -249,6 +249,8 @@ fn test_become_following_active_candidate_emits_close() -> anyhow::Result<()> {
         m01(),
         vec![],
         eng.state.progress_id_gen.clone(),
+        None,
+        None,
     ));
     eng.state.server_state = ServerState::Candidate;
 
@@ -274,6 +276,8 @@ fn test_become_following_active_pre_candidate_emits_close() -> anyhow::Result<()
         m01(),
         vec![],
         eng.state.progress_id_gen.clone(),
+        None,
+        None,
     ));
     eng.state.server_state = ServerState::Candidate;
 
@@ -300,6 +304,8 @@ fn test_become_following_invalid_role_combination_emits_single_close() -> anyhow
         m01(),
         vec![],
         eng.state.progress_id_gen.clone(),
+        None,
+        None,
     ));
     eng.state.server_state = ServerState::Leader;
 

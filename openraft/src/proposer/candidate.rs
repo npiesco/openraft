@@ -4,6 +4,7 @@ use display_more::DisplayOptionExt;
 use validit::Valid;
 
 use crate::RaftTypeConfig;
+use crate::async_runtime::Charge;
 use crate::base::shared_id_generator::SharedIdGenerator;
 use crate::display_ext::DisplayInstantExt;
 use crate::engine::leader_log_ids::LeaderLogIds;
@@ -18,7 +19,7 @@ use crate::vote::RaftVote;
 use crate::vote::raft_vote::RaftVoteExt;
 
 /// Candidate: voting state.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub(crate) struct Candidate<C, QS>
 where
     C: RaftTypeConfig,
@@ -40,6 +41,12 @@ where
     learner_ids: Vec<C::NodeId>,
 
     progress_id_gen: SharedIdGenerator,
+
+    /// What the Leader it becomes is charged, taken with its own charge before it was built.
+    leader_charge: Option<Charge>,
+
+    /// What it is charged, held until its progress and learner ids are freed.
+    charge: Option<Charge>,
 }
 
 impl<C, QS> fmt::Display for Candidate<C, QS>
@@ -71,6 +78,8 @@ where
         quorum_set: QS,
         learner_ids: impl IntoIterator<Item = C::NodeId>,
         progress_id_gen: SharedIdGenerator,
+        charge: Option<Charge>,
+        leader_charge: Option<Charge>,
     ) -> Self {
         Self {
             starting_time,
@@ -80,6 +89,8 @@ where
             quorum_set,
             learner_ids: learner_ids.into_iter().collect::<Vec<_>>(),
             progress_id_gen,
+            leader_charge,
+            charge,
         }
     }
 
@@ -141,12 +152,28 @@ where
         let last = self.last_log_id();
         let last_leader_log_ids = last.cloned().map(LeaderLogIds::new_single);
 
-        Leader::new(
+        let Self {
+            progress,
+            quorum_set,
+            learner_ids,
+            progress_id_gen,
+            leader_charge,
+            charge,
+            ..
+        } = self;
+
+        let leader = Leader::new(
             vote,
-            self.quorum_set.clone(),
-            self.learner_ids,
+            quorum_set,
+            learner_ids,
             last_leader_log_ids, // already Option<LeaderLogIds>
-            self.progress_id_gen,
-        )
+            progress_id_gen,
+            leader_charge,
+        );
+
+        // The Candidate's charge is credited back only once its progress is freed.
+        drop(progress);
+        drop(charge);
+        leader
     }
 }

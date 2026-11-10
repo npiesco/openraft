@@ -41,8 +41,8 @@ where C: RaftTypeConfig
         }
 
         let leader = candidate.into_leader();
-        *self.leader = Some(Box::new(leader));
+        *self.leader = Some(leader);
 
-        self.leader.as_mut().map(|x| x.as_mut())
+        self.leader.as_mut()
     }
 }

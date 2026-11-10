@@ -20,6 +20,7 @@ use crate::entry::RaftPayload;
 use crate::errors::RejectVote;
 use crate::proposer::CandidateState;
 use crate::proposer::LeaderState;
+use crate::proposer::funding;
 use crate::raft_state::IOId;
 use crate::raft_state::LogStateReader;
 use crate::storage::RaftStateMachine;
@@ -203,9 +204,18 @@ where
         // It's a different leader that creates this vote.
         // Re-create a new Leader instance.
 
-        let leader = self.state.new_leader();
+        // Charged before it is built. Refused, this node does not lead this vote: it is demoted in
+        // memory, and the next election timeout campaigns again.
+        let membership = self.state.membership_state.effective().membership();
+        let Ok(charge) = self.config.funding.charge(funding::leader_state_bytes::<C>(membership)) else {
+            tracing::warn!("not leading vote {}: its Leader is not funded", self.state.vote_ref());
+            self.refuse_leading();
+            return;
+        };
+
+        let leader = self.state.new_leader(charge);
         let leader_vote = leader.committed_vote_ref().clone();
-        *self.leader = Some(Box::new(leader));
+        *self.leader = Some(leader);
 
         let (last_log_id, noop_log_id) = {
             let leader = self.leader.as_ref().unwrap();
@@ -230,10 +240,35 @@ where
         // If the leader has not yet proposed any log, propose a blank log and initiate replication;
         // Otherwise, just initiate replication.
         if last_log_id.as_ref() < Some(&noop_log_id) {
-            self.leader_handler().leader_append_entries([C::Payload::blank()]);
+            self.leader_handler().leader_append_entries([C::Payload::blank()], None);
         } else {
             self.replication_handler().initiate_replication();
         }
+    }
+
+    /// Demote a committed vote of this node that cannot be led, the way startup does without
+    /// leader restore.
+    ///
+    /// Only in memory: the stored vote stays committed. There is no vote `x` such that
+    /// `(term, node, non-committed) < x < (term, node, committed)`, so any vote accepted later is
+    /// greater than the stored one too, and its `SaveVote` heals the divergence.
+    fn refuse_leading(&mut self) {
+        let uncommitted: VoteOf<C> = self.state.vote.to_non_committed().into_vote();
+        self.state.vote.update(C::now(), Duration::default(), uncommitted);
+        debug_assert!(!self.state.is_leader(&self.config.id));
+
+        let had_leading_state = self.leader.is_some() || self.candidate.is_some() || self.pre_candidate.is_some();
+
+        *self.leader = None;
+        *self.candidate = None;
+        *self.pre_candidate = None;
+
+        self.output.prepend_command(Command::FailPendingReads);
+        if had_leading_state {
+            self.output.push_command(Command::CloseReplicationStreams);
+        }
+
+        self.server_state_handler().update_server_state_if_changed();
     }
 
     /// Enter following state (vote.node_id != self.id or self is not a voter).

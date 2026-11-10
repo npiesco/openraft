@@ -185,7 +185,8 @@ where
     #[error(transparent)]
     NodeMetadataChanged(#[from] NodeMetadataChanged<NID>),
 
-    /// The payload refused to bind the membership the change computed.
+    /// The payload refused to bind the membership the change computed, or the rebuild of the
+    /// Leader's progress for it was not funded.
     #[since(version = "0.10.0")]
     #[error(transparent)]
     MembershipRefused(#[from] MembershipRefused),

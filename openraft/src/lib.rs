@@ -144,6 +144,7 @@ pub use crate::node::EmptyNode;
 pub use crate::node::Node;
 pub use crate::node::NodeId;
 pub use crate::node::NodeInfo;
+pub use crate::proposer::funding::proposer_state_bytes;
 pub use crate::raft::Precondition;
 pub use crate::raft::Raft;
 pub use crate::raft::ReadPolicy;

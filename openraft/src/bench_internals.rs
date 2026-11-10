@@ -61,7 +61,7 @@ impl BenchEngine {
     #[inline]
     pub fn append<I>(&mut self, payloads: I)
     where I: IntoIterator<Item = PayloadOf<UTConfig>> + AsRef<[PayloadOf<UTConfig>]> {
-        self.0.try_leader_handler().unwrap().leader_append_entries(payloads);
+        self.0.try_leader_handler().unwrap().leader_append_entries(payloads, None);
     }
 
     /// Drop the commands [`Self::append()`] has queued, which would otherwise grow without bound.

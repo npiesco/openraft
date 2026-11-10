@@ -19,6 +19,9 @@ use crate::engine::EngineConfig;
 use crate::engine::LogIdList;
 use crate::engine::testing::UTConfig;
 use crate::engine::testing::log_id;
+use crate::proposer::funding::candidate_state_bytes;
+use crate::proposer::funding::leader_state_bytes;
+use crate::proposer::funding::testing::Limit;
 use crate::raft::VoteRequest;
 use crate::raft::VoteResponse;
 use crate::type_config::TypeConfigExt;
@@ -329,7 +332,7 @@ fn test_election_on_leader_is_ignored() -> anyhow::Result<()> {
     eng.handle_vote_resp(2, VoteResponse::new(Vote::new(1, 1), Some(log_id(0, 0, 0)), true));
     eng.output.take_commands();
 
-    eng.new_pre_candidate(Vote::new(2, 1));
+    eng.new_pre_candidate(Vote::new(2, 1)).unwrap();
     assert_eq!(Vote::new(2, 1), *eng.pre_candidate_ref().unwrap().vote_ref());
 
     eng.elect();
@@ -448,4 +451,58 @@ fn test_elect_removed_committed_voter_uses_effective_quorum() {
             eng.leader_ref().unwrap().progress.iter().map(|entry| entry.id).collect::<BTreeSet<_>>()
         );
     }
+}
+
+fn multi_node_eng() -> Engine<UTConfig> {
+    let mut eng = eng();
+    eng.config.id = 1;
+    eng.state
+        .membership_state
+        .set_effective(StoredMembershipOf::<UTConfig>::new(Some(log_id(0, 1, 1)), m12()));
+    eng.state.log_ids = LogIdList::new(None, vec![log_id(1, 1, 1)]);
+    eng
+}
+
+#[test]
+fn test_elect_refused_its_funding_changes_nothing() {
+    let limit = Limit::new(0);
+    let mut eng = multi_node_eng();
+    eng.config.funding = limit.funding();
+    let vote = *eng.state.vote_ref();
+    let server_state = eng.state.server_state;
+    let election_timeout = eng.config.timer_config.election_timeout;
+
+    eng.elect();
+
+    assert_eq!(vote, *eng.state.vote_ref());
+    assert!(eng.candidate_ref().is_none());
+    assert_eq!(server_state, eng.state.server_state);
+    assert_eq!(election_timeout, eng.config.timer_config.election_timeout);
+    assert_eq!(Vec::<Command<UTConfig>>::new(), eng.output.take_commands());
+    assert_eq!(0, limit.held());
+}
+
+#[test]
+fn test_elect_charges_its_candidate_and_leader_until_they_are_freed() {
+    let limit = Limit::new(usize::MAX);
+    let mut eng = multi_node_eng();
+    eng.config.funding = limit.funding();
+
+    eng.elect();
+    assert_eq!(
+        candidate_state_bytes::<UTConfig>(&m12()) + leader_state_bytes::<UTConfig>(&m12()),
+        limit.held(),
+        "the Candidate is charged with the Leader it may become"
+    );
+
+    eng.handle_vote_resp(2, VoteResponse::new(Vote::new(1, 1), Some(log_id(1, 1, 1)), true));
+    assert!(eng.leader_ref().is_some());
+    assert_eq!(
+        leader_state_bytes::<UTConfig>(&m12()),
+        limit.held(),
+        "the Leader keeps its part; the Candidate's is credited back as it is freed"
+    );
+
+    eng.leader = None;
+    assert_eq!(0, limit.held());
 }

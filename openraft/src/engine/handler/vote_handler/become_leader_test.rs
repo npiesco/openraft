@@ -17,6 +17,8 @@ use crate::entry::RaftEntry;
 use crate::progress::entry::ProgressEntry;
 use crate::progress::inflight_id::InflightId;
 use crate::progress::stream_id::StreamId;
+use crate::proposer::funding::leader_state_bytes;
+use crate::proposer::funding::testing::Limit;
 use crate::raft_state::IOId;
 use crate::replication::payload::Payload;
 use crate::replication::replicate::Replicate;
@@ -109,4 +111,37 @@ fn test_become_leader_waits_for_previous_io() {
         io_id: leader_io,
     });
     assert_eq!(first_command, expected);
+}
+
+#[test]
+fn test_become_leader_holds_its_charge_until_it_is_freed() {
+    let limit = Limit::new(usize::MAX);
+    let mut eng = eng();
+    eng.config.funding = limit.funding();
+
+    eng.vote_handler().become_leader();
+    assert!(eng.leader.is_some());
+    assert_eq!(leader_state_bytes::<UTConfig>(&m01()), limit.held());
+
+    eng.leader = None;
+    assert_eq!(0, limit.held());
+}
+
+#[test]
+fn test_become_leader_refused_its_funding_demotes_the_vote() {
+    let limit = Limit::new(0);
+    let mut eng = eng();
+    eng.config.funding = limit.funding();
+
+    eng.vote_handler().become_leader();
+
+    assert!(eng.leader.is_none());
+    assert_eq!(
+        Vote::new(2, 1),
+        *eng.state.vote_ref(),
+        "demoted in memory, not committed"
+    );
+    assert_eq!(ServerState::Candidate, eng.state.server_state);
+    assert_eq!(eng.output.take_commands(), vec![Command::FailPendingReads]);
+    assert_eq!(0, limit.held());
 }

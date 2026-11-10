@@ -67,7 +67,7 @@ fn test_leader_append_membership_for_leader() -> anyhow::Result<()> {
     eng.testing_new_leader();
     eng.output.take_commands();
 
-    eng.replication_handler().append_membership(&log_id(3, 1, 4), &m34());
+    eng.replication_handler().append_membership(&log_id(3, 1, 4), &m34(), None);
 
     assert_eq!(
         MembershipState::new(
@@ -170,7 +170,7 @@ fn test_leader_append_membership_update_learner_process() -> anyhow::Result<()> 
         unreachable!("leader should not be None");
     }
 
-    eng.replication_handler().append_membership(&log_id(3, 1, 4), &m4_356());
+    eng.replication_handler().append_membership(&log_id(3, 1, 4), &m4_356(), None);
 
     assert_eq!(
         MembershipState::new(

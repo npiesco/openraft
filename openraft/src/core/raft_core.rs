@@ -73,10 +73,12 @@ use crate::errors::ForwardToLeader;
 use crate::errors::Infallible;
 use crate::errors::InitializeError;
 use crate::errors::LinearizableReadError;
+use crate::errors::MembershipRefused;
 use crate::errors::PreconditionFailed;
 use crate::errors::StorageIOResult;
 use crate::errors::Timeout;
 use crate::errors::UncommittedLeaderLog;
+use crate::errors::Unfunded;
 use crate::impls::ProgressResponder;
 use crate::log_id::option_raft_log_id_ext::OptionRaftLogIdExt;
 use crate::metrics::HeartbeatMetrics;
@@ -665,8 +667,20 @@ where
             }
         };
 
+        // Charged before the entries are appended: refused, none of them is written.
+        let funded = match lh.fund_append(payloads.as_ref()) {
+            Ok(funded) => funded,
+            Err(Unfunded) => {
+                let err = ClientWriteError::ChangeMembershipError(MembershipRefused.into());
+                for tx in responders.into_iter().flatten() {
+                    tx.on_complete(Err(err.clone()))
+                }
+                return None;
+            }
+        };
+
         let entry_count = payloads.len() as u64;
-        let log_ids = lh.leader_append_entries(payloads)?;
+        let log_ids = lh.leader_append_entries(payloads, funded)?;
 
         #[cfg(feature = "runtime-stats")]
         {

@@ -39,7 +39,7 @@ fn test_handle_pre_vote_resp_quorum_starts_real_election() -> anyhow::Result<()>
     let mut eng = eng();
 
     // A pre-vote round in flight at the hypothetical next term, self-granted.
-    eng.new_pre_candidate(Vote::new(1, 1));
+    eng.new_pre_candidate(Vote::new(1, 1)).unwrap();
     eng.pre_candidate_mut().unwrap().grant_by(&1);
     eng.output.take_commands();
 
@@ -125,7 +125,7 @@ fn test_winning_election_cancels_overlapping_pre_vote() -> anyhow::Result<()> {
 fn test_handle_pre_vote_resp_reject_keeps_waiting() -> anyhow::Result<()> {
     let mut eng = eng();
 
-    eng.new_pre_candidate(Vote::new(1, 1));
+    eng.new_pre_candidate(Vote::new(1, 1)).unwrap();
     eng.pre_candidate_mut().unwrap().grant_by(&1);
     eng.output.take_commands();
 
@@ -150,7 +150,7 @@ fn test_handle_pre_vote_resp_reject_keeps_waiting() -> anyhow::Result<()> {
 fn test_handle_pre_vote_resp_reject_seen_greater_log() -> anyhow::Result<()> {
     let mut eng = eng();
 
-    eng.new_pre_candidate(Vote::new(1, 1));
+    eng.new_pre_candidate(Vote::new(1, 1)).unwrap();
     eng.pre_candidate_mut().unwrap().grant_by(&1);
     eng.output.take_commands();
 
@@ -181,7 +181,7 @@ fn test_handle_pre_vote_resp_reject_adopts_higher_vote() -> anyhow::Result<()> {
     eng.state.vote = Leased::new(UTConfig::<()>::now(), Duration::from_millis(0), Vote::new(5, 3));
 
     // Pre-vote round in flight at hypothetical term 6, self-granted by node 1.
-    eng.new_pre_candidate(Vote::new(6, 1));
+    eng.new_pre_candidate(Vote::new(6, 1)).unwrap();
     eng.pre_candidate_mut().unwrap().grant_by(&1);
     eng.output.take_commands();
 
@@ -216,7 +216,7 @@ fn test_handle_pre_vote_resp_reject_equal_vote_unchanged() -> anyhow::Result<()>
     // Local vote: term=5, node=1.
     eng.state.vote = Leased::new(UTConfig::<()>::now(), Duration::from_millis(0), Vote::new(5, 1));
 
-    eng.new_pre_candidate(Vote::new(6, 1));
+    eng.new_pre_candidate(Vote::new(6, 1)).unwrap();
     eng.pre_candidate_mut().unwrap().grant_by(&1);
     eng.output.take_commands();
 

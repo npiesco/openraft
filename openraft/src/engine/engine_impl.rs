@@ -28,10 +28,12 @@ use crate::errors::InitializeError;
 use crate::errors::NotAllowed;
 use crate::errors::NotInMembers;
 use crate::errors::RejectAppendEntries;
+use crate::errors::Unfunded;
 use crate::proposer::Candidate;
 use crate::proposer::Leader;
 use crate::proposer::LeaderQuorumSet;
 use crate::proposer::LeaderState;
+use crate::proposer::funding;
 use crate::proposer::leader_state::CandidateState;
 use crate::raft::LogSegment;
 use crate::raft::SnapshotResponse;
@@ -128,11 +130,18 @@ where
     ///
     /// The candidate `last_log_id` is initialized with the attributes of Acceptor part:
     /// [`RaftState`]
-    pub(crate) fn new_candidate(&mut self, vote: VoteOf<C>) -> &mut Candidate<C, LeaderQuorumSet<C>> {
+    ///
+    /// It is charged, with the Leader it may become, before it is built: refused, nothing is
+    /// built and nothing changes.
+    pub(crate) fn new_candidate(&mut self, vote: VoteOf<C>) -> Result<&mut Candidate<C, LeaderQuorumSet<C>>, Unfunded> {
+        let membership = self.state.membership_state.effective().membership();
+
+        let leader_bytes = funding::leader_state_bytes::<C>(membership);
+        let mut charge = self.config.funding.charge(funding::candidate_state_bytes::<C>(membership) + leader_bytes)?;
+        let leader_charge = charge.as_mut().and_then(|charge| charge.split(leader_bytes));
+
         let now = C::now();
         let last_log_id = self.state.last_log_id().cloned();
-
-        let membership = self.state.membership_state.effective().membership();
 
         self.candidate = Some(Candidate::new(
             now,
@@ -141,9 +150,11 @@ where
             membership.clone(),
             membership.learner_ids(),
             self.state.progress_id_gen.clone(),
+            charge,
+            leader_charge,
         ));
 
-        self.candidate.as_mut().unwrap()
+        Ok(self.candidate.as_mut().unwrap())
     }
 
     /// Create a new pre-candidate state and return the mutable reference to it.
@@ -151,11 +162,18 @@ where
     /// Like [`new_candidate`](Self::new_candidate), but for the Pre-Vote round: the resulting
     /// quorum tracker lives in [`pre_candidate`](Self::pre_candidate) and `vote` is only a
     /// hypothetical next-term vote that is never persisted.
-    pub(crate) fn new_pre_candidate(&mut self, vote: VoteOf<C>) -> &mut Candidate<C, LeaderQuorumSet<C>> {
+    ///
+    /// It is charged before it is built: refused, nothing is built and nothing changes.
+    pub(crate) fn new_pre_candidate(
+        &mut self,
+        vote: VoteOf<C>,
+    ) -> Result<&mut Candidate<C, LeaderQuorumSet<C>>, Unfunded> {
+        let membership = self.state.membership_state.effective().membership();
+
+        let charge = self.config.funding.charge(funding::candidate_state_bytes::<C>(membership))?;
+
         let now = C::now();
         let last_log_id = self.state.last_log_id().cloned();
-
-        let membership = self.state.membership_state.effective().membership();
 
         self.pre_candidate = Some(Candidate::new(
             now,
@@ -164,9 +182,11 @@ where
             membership.clone(),
             membership.learner_ids(),
             self.state.progress_id_gen.clone(),
+            charge,
+            None,
         ));
 
-        self.pre_candidate.as_mut().unwrap()
+        Ok(self.pre_candidate.as_mut().unwrap())
     }
 
     #[tracing::instrument(level = "debug", skip_all)]
@@ -283,19 +303,24 @@ where
             return;
         }
 
-        // A real campaign consumes the timeout selected before it. Sample the
-        // timeout that will gate the next campaign before entering this one.
-        self.config.resample_election_timeout();
-
         let new_term = self.state.vote.term().next();
         let leader_id = LeaderIdOf::<C>::new(new_term, self.config.id.clone());
         let new_vote = VoteOf::<C>::from_leader_id(leader_id, false);
 
-        let candidate = self.new_candidate(new_vote.clone());
+        // Charged before anything changes: refused, this campaign is skipped and the next
+        // election timeout tries again.
+        let Ok(candidate) = self.new_candidate(new_vote.clone()) else {
+            tracing::warn!("skip election, its Candidate and Leader are not funded");
+            return;
+        };
 
         tracing::info!("{}: new candidate: {}", func_name!(), candidate);
 
         let last_log_id = candidate.last_log_id().cloned();
+
+        // A real campaign consumes the timeout selected before it. Sample the
+        // timeout that will gate the next campaign before entering this one.
+        self.config.resample_election_timeout();
 
         // Simulate sending RequestVote RPC to local node.
         // Safe unwrap(): it won't reject itself ˙–˙
@@ -337,18 +362,22 @@ where
             return;
         }
 
-        // Pre-Vote does not advance the persisted vote timestamp. Give every
-        // new Pre-Vote round a fresh timeout instead of retaining one sample.
-        self.config.resample_election_timeout();
-
         let new_term = self.state.vote.term().next();
         let leader_id = LeaderIdOf::<C>::new(new_term, self.config.id.clone());
         let pre_vote = VoteOf::<C>::from_leader_id(leader_id, false);
 
-        let pre_candidate = self.new_pre_candidate(pre_vote.clone());
+        // Charged before anything changes: refused, the round is skipped, as a refused round is.
+        let Ok(pre_candidate) = self.new_pre_candidate(pre_vote.clone()) else {
+            tracing::warn!("skip pre-elect, its pre-candidate is not funded");
+            return;
+        };
         tracing::info!("{}: new pre-candidate: {}", func_name!(), pre_candidate);
 
         let last_log_id = pre_candidate.last_log_id().cloned();
+
+        // Pre-Vote does not advance the persisted vote timestamp. Give every
+        // new Pre-Vote round a fresh timeout instead of retaining one sample.
+        self.config.resample_election_timeout();
 
         // Grant the Pre-Vote to itself. A single-voter cluster reaches a quorum at once and proceeds
         // directly to a real election, without an unnecessary network round-trip.
@@ -367,11 +396,11 @@ where
     }
 
     pub(crate) fn leader_ref(&self) -> Option<&Leader<C, LeaderQuorumSet<C>>> {
-        self.leader.as_deref()
+        self.leader.as_ref()
     }
 
     pub(crate) fn leader_mut(&mut self) -> Option<&mut Leader<C, LeaderQuorumSet<C>>> {
-        self.leader.as_deref_mut()
+        self.leader.as_mut()
     }
 
     pub(crate) fn candidate_ref(&self) -> Option<&Candidate<C, LeaderQuorumSet<C>>> {
@@ -424,7 +453,7 @@ where
         // quorum keeps acking this Leader, reject the vote. A leadership-transfer election is
         // authorized by this very Leader, so it proceeds.
         if !req.leadership_transfer
-            && let Some(leader) = self.leader.as_deref()
+            && let Some(leader) = self.leader.as_ref()
             && leader.is_lease_valid(self.config.timer_config.leader_lease)
         {
             tracing::info!("reject vote-request: quorum-ack lease has not yet expired");
@@ -489,7 +518,7 @@ where
 
         // A Leader never renews the lease on its own `state.vote`; its live lease is the
         // quorum-ack lease. While a quorum keeps acking this Leader, it would not grant.
-        if let Some(leader) = self.leader.as_deref()
+        if let Some(leader) = self.leader.as_ref()
             && leader.is_lease_valid(self.config.timer_config.leader_lease)
         {
             tracing::info!("reject pre-vote-request: quorum-ack lease has not yet expired");
@@ -956,7 +985,7 @@ where
         // No need to submit UpdateIOProgress command,
         // IO progress is updated by the new blank log
 
-        self.try_leader_handler().unwrap().leader_append_entries([C::Payload::blank()]);
+        self.try_leader_handler().unwrap().leader_append_entries([C::Payload::blank()], None);
     }
 
     /// Check if a raft node is in a state that allows to initialize.
@@ -1136,8 +1165,8 @@ mod engine_testing {
         /// without initializing related resource,
         /// such as setting up replication, propose blank log.
         pub(crate) fn testing_new_leader(&mut self) -> &mut crate::proposer::Leader<C, LeaderQuorumSet<C>> {
-            let leader = self.state.new_leader();
-            self.leader = Some(Box::new(leader));
+            let leader = self.state.new_leader(None);
+            self.leader = Some(leader);
             self.leader.as_mut().unwrap()
         }
     }

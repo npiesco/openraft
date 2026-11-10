@@ -74,10 +74,10 @@ fn test_handle_vote_resp() -> anyhow::Result<()> {
         eng.state
             .membership_state
             .set_effective(StoredMembershipOf::<UTConfig>::new(Some(log_id(1, 1, 1)), m12()));
-        eng.new_candidate(*eng.state.vote_ref());
+        eng.new_candidate(*eng.state.vote_ref()).unwrap();
         eng.output.take_commands();
 
-        let voting = eng.new_candidate(*eng.state.vote_ref());
+        let voting = eng.new_candidate(*eng.state.vote_ref()).unwrap();
         voting.grant_by(&1);
 
         eng.state.server_state = ServerState::Candidate;
@@ -111,10 +111,10 @@ fn test_handle_vote_resp() -> anyhow::Result<()> {
         eng.state
             .membership_state
             .set_effective(StoredMembershipOf::<UTConfig>::new(Some(log_id(1, 1, 1)), m12()));
-        eng.new_candidate(*eng.state.vote_ref());
+        eng.new_candidate(*eng.state.vote_ref()).unwrap();
         eng.output.take_commands();
 
-        let voting = eng.new_candidate(*eng.state.vote_ref());
+        let voting = eng.new_candidate(*eng.state.vote_ref()).unwrap();
         voting.grant_by(&1);
 
         eng.state.server_state = ServerState::Candidate;
@@ -150,10 +150,10 @@ fn test_handle_vote_resp() -> anyhow::Result<()> {
         eng.state
             .membership_state
             .set_effective(StoredMembershipOf::<UTConfig>::new(Some(log_id(1, 1, 1)), m1234()));
-        eng.new_candidate(*eng.state.vote_ref());
+        eng.new_candidate(*eng.state.vote_ref()).unwrap();
         eng.output.take_commands();
 
-        let voting = eng.new_candidate(*eng.state.vote_ref());
+        let voting = eng.new_candidate(*eng.state.vote_ref()).unwrap();
         voting.grant_by(&1);
 
         eng.state.server_state = ServerState::Candidate;
@@ -185,9 +185,9 @@ fn test_handle_vote_resp_equal_vote() -> anyhow::Result<()> {
         eng.state
             .membership_state
             .set_effective(StoredMembershipOf::<UTConfig>::new(Some(log_id(1, 1, 1)), m12()));
-        eng.new_candidate(*eng.state.vote_ref());
+        eng.new_candidate(*eng.state.vote_ref()).unwrap();
 
-        let voting = eng.new_candidate(*eng.state.vote_ref());
+        let voting = eng.new_candidate(*eng.state.vote_ref()).unwrap();
         voting.grant_by(&1);
 
         eng.state.server_state = ServerState::Candidate;
@@ -250,7 +250,7 @@ fn test_handle_vote_resp_seen_greater_log_until_caught_up() -> anyhow::Result<()
     eng.state
         .membership_state
         .set_effective(StoredMembershipOf::<UTConfig>::new(Some(log_id(1, 1, 1)), m12()));
-    let voting = eng.new_candidate(*eng.state.vote_ref());
+    let voting = eng.new_candidate(*eng.state.vote_ref()).unwrap();
     voting.grant_by(&1);
     eng.state.server_state = ServerState::Candidate;
     eng.output.take_commands();
