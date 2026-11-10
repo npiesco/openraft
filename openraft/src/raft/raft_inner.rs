@@ -9,6 +9,7 @@ use tracing::Level;
 
 use crate::Config;
 use crate::Extensions;
+use crate::LogIdOptionExt;
 use crate::OptionalSend;
 use crate::RaftMetrics;
 use crate::RaftTypeConfig;
@@ -28,6 +29,9 @@ use crate::errors::Unfunded;
 use crate::metrics::RaftDataMetrics;
 use crate::metrics::RaftServerMetrics;
 use crate::metrics::Wait;
+use crate::metrics::WaitError;
+use crate::proposer::funding::Elapsed;
+use crate::proposer::funding::Funding;
 use crate::proposer::funding::OneshotCharge;
 use crate::proposer::funding::Shared;
 use crate::proposer::funding::TaskCharge;
@@ -35,6 +39,8 @@ use crate::raft::core_state::CoreState;
 use crate::type_config::AsyncRuntime;
 use crate::type_config::TypeConfigExt;
 use crate::type_config::alias::AsyncRuntimeOf;
+use crate::type_config::alias::InstantOf;
+use crate::type_config::alias::LogIdOf;
 use crate::type_config::alias::MpscSenderOf;
 use crate::type_config::alias::OneshotReceiverOf;
 use crate::type_config::alias::OneshotSenderOf;
@@ -172,6 +178,23 @@ where C: RaftTypeConfig
         TaskCharge::take_from(self.funder.get(), more)
     }
 
+    /// The output of `future`, or [`Elapsed`] once `deadline` passes, raced against one sleep
+    /// charged to the node's funder before it is made and held until it is dropped, as
+    /// [`Funding::within`] charges it: refused as [`Unfunded`], nothing made and `future` not
+    /// polled, if the funder refuses it or the runtime cannot fund its timers. A node run unfunded
+    /// makes it uncharged.
+    pub(crate) async fn within<F>(
+        &self,
+        deadline: InstantOf<C>,
+        future: F,
+    ) -> Result<Result<F::Output, Elapsed>, Unfunded>
+    where
+        F: Future + OptionalSend,
+    {
+        let funding = Funding::new(self.funder.get().cloned());
+        funding.within::<C, F>(deadline, future).await
+    }
+
     /// Receive a message from RaftCore, return an error if the response is not delivered.
     pub(crate) async fn recv_msg<T, E>(&self, rx: impl Future<Output = Result<T, E>>) -> Result<T, Fatal<C>>
     where
@@ -216,8 +239,11 @@ where C: RaftTypeConfig
     ///
     /// Returns `true` if a stop was observed, `false` if the core is still running after `timeout`
     /// (e.g. the response channel was closed by a dropped responder rather than a core shutdown).
+    /// It waits on a sleep charged as [`Self::within`] charges it: refused, it does not wait, and
+    /// tells whether the core has stopped already.
     async fn wait_core_stopped(&self, timeout: Duration) -> bool {
         let mut rx = self.rx_metrics.clone();
+        let stopped = rx.borrow_watched().running_state.is_err();
         let observe = async move {
             loop {
                 if rx.borrow_watched().running_state.is_err() {
@@ -230,7 +256,13 @@ where C: RaftTypeConfig
                 }
             }
         };
-        C::timeout(timeout, observe).await.is_ok()
+        match self.within(C::now() + timeout, observe).await {
+            Ok(observed) => observed.is_ok(),
+            Err(Unfunded) => {
+                tracing::warn!("{}: no wait for RaftCore to stop: its sleep is unfunded", func_name!());
+                stopped
+            }
+        }
     }
 
     /// Send an [`ExternalCommand`] to RaftCore to execute in the `RaftCore` thread.
@@ -351,6 +383,41 @@ where C: RaftTypeConfig
                         break;
                     }
                 }
+            }
+        }
+    }
+
+    /// Wait until the state machine has applied the log at `index`: its last applied log id, or,
+    /// if `timeout` passes first, the last applied log id as `Err`. Unlike [`Wait`], it reads the
+    /// metrics where their channel holds them, not cloned, and builds no message: its timeout is
+    /// one sleep charged as [`Self::within`] charges it, refused, it waits no longer, as if it
+    /// elapsed. [`WaitError::ShuttingDown`] if RaftCore stops first.
+    pub(crate) async fn wait_applied(
+        &self,
+        index: Option<u64>,
+        timeout: Option<Duration>,
+    ) -> Result<Result<Option<LogIdOf<C>>, Option<LogIdOf<C>>>, WaitError> {
+        let deadline = timeout.map(|timeout| C::now() + timeout);
+        let mut rx = self.rx_metrics.clone();
+        loop {
+            {
+                let metrics = rx.borrow_watched();
+                if metrics.last_applied.index() >= index {
+                    return Ok(Ok(metrics.last_applied.clone()));
+                }
+            }
+
+            let changed = match deadline {
+                None => rx.changed().await,
+                Some(deadline) => match self.within(deadline, rx.changed()).await {
+                    Ok(Ok(changed)) => changed,
+                    Ok(Err(Elapsed)) | Err(Unfunded) => {
+                        return Ok(Err(rx.borrow_watched().last_applied.clone()));
+                    }
+                },
+            };
+            if changed.is_err() {
+                return Err(WaitError::ShuttingDown);
             }
         }
     }

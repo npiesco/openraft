@@ -5,7 +5,6 @@ use openraft_macros::since;
 
 use crate::Raft;
 use crate::RaftTypeConfig;
-use crate::async_runtime::watch::WatchReceiver;
 use crate::errors::Fatal;
 use crate::metrics::WaitError;
 use crate::raft::linearizable_read::LinearizeState;
@@ -127,28 +126,24 @@ where C: RaftTypeConfig
 
         let expected = Some(self.state.read_log_id().index());
 
-        let res = raft.inner.wait(timeout).applied_index_at_least(expected, "Linearizer::try_await_ready").await;
+        // Read where the metrics are held, its timeout on a funded sleep: refused, it waits no
+        // longer, as if it elapsed.
+        let res = raft.inner.wait_applied(expected, timeout).await;
 
         match res {
-            Ok(metrics) => Ok(Ok(self.state.with_applied(this_id.clone(), metrics.last_applied))),
-            Err(e) => match e {
-                WaitError::Timeout(_, _) => {
-                    let metrics_rx = raft.metrics();
-                    let ref_metrics = metrics_rx.borrow_watched();
-                    let applied = ref_metrics.last_applied.clone();
-
-                    let state = self.state.with_applied(this_id.clone(), applied);
-                    if state.is_ready_on_node(this_id) {
-                        Ok(Ok(state))
-                    } else {
-                        Ok(Err(state))
-                    }
+            Ok(Ok(applied)) => Ok(Ok(self.state.with_applied(this_id.clone(), applied))),
+            Ok(Err(applied)) => {
+                let state = self.state.with_applied(this_id.clone(), applied);
+                if state.is_ready_on_node(this_id) {
+                    Ok(Ok(state))
+                } else {
+                    Ok(Err(state))
                 }
-                WaitError::ShuttingDown => {
-                    let err = raft.inner.get_core_stop_error().await;
-                    Err(err)
-                }
-            },
+            }
+            Err(WaitError::ShuttingDown) | Err(WaitError::Timeout(..)) => {
+                let err = raft.inner.get_core_stop_error().await;
+                Err(err)
+            }
         }
     }
 }

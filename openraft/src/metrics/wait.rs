@@ -33,6 +33,11 @@ pub enum WaitError {
 
 /// Wait is a wrapper of RaftMetrics channel that impls several utils to wait for metrics to satisfy
 /// some condition.
+///
+/// It is a diagnostic, not funded: each check clones the metrics and formats its message, and its
+/// timeout is a sleep charged to no funder. What a funded node waits on for a caller, as
+/// [`Linearizer::try_await_ready`](crate::raft::linearizable_read::Linearizer::try_await_ready)
+/// does, reads the metrics in place and charges its sleep.
 #[since]
 pub struct Wait<C: RaftTypeConfig> {
     /// The timeout duration for waiting operations.

@@ -92,6 +92,27 @@ impl Funding {
         self.charge(each.checked_mul(count).and_then(|tasks| tasks.checked_add(held)).ok_or(Unfunded)?)
     }
 
+    /// The output of `future`, or [`Elapsed`] once `deadline` passes, as [`within`] races them,
+    /// on one sleep charged before it is made, as [`sleep_bytes`] tells, and held until it is
+    /// dropped: refused as [`Unfunded`], nothing made and `future` not polled, if the funder
+    /// refuses it or the runtime cannot fund its timers. A node without a funder charges nothing.
+    pub(crate) async fn within<C, F>(
+        &self,
+        deadline: InstantOf<C>,
+        future: F,
+    ) -> Result<Result<F::Output, Elapsed>, Unfunded>
+    where
+        C: RaftTypeConfig,
+        F: Future + OptionalSend,
+    {
+        let _sleep = if self.is_funded() {
+            self.charge(sleep_bytes::<C>().ok_or(Unfunded)?)?
+        } else {
+            None
+        };
+        Ok(within::<C, F>(deadline, future).await)
+    }
+
     /// A oneshot channel carrying `T`, its block charged before it is made and held until both
     /// halves are dropped and the block is freed: refused as [`Unfunded`], nothing allocated, as
     /// [`OneshotCharge::take`] is.
@@ -1003,6 +1024,31 @@ mod tests {
 
             let first = within::<C, _>(C::now(), ready(4)).await;
             assert_eq!(Ok(4), first, "a ready future is polled before the deadline");
+        });
+    }
+
+    /// A caller's timeout is charged its sleep before it is made: refused, as the test runtime
+    /// cannot fund a sleep, nothing is charged and the future is not polled; a node without a
+    /// funder waits uncharged.
+    #[test]
+    fn test_funded_within_is_charged_its_sleep_or_refused() {
+        C::run(async {
+            let limit = Limit::new(usize::MAX);
+            let polled = std::sync::atomic::AtomicBool::new(false);
+            let future = std::future::poll_fn(|_| {
+                polled.store(true, std::sync::atomic::Ordering::Relaxed);
+                std::task::Poll::Ready(5)
+            });
+            let refused = limit.funding().within::<C, _>(C::now() + Duration::from_secs(5), future).await;
+            assert_eq!(Err(Unfunded), refused);
+            assert!(
+                !polled.load(std::sync::atomic::Ordering::Relaxed),
+                "refused, the future is not polled"
+            );
+            assert_eq!(0, limit.held());
+
+            let unfunded = Funding::default().within::<C, _>(C::now() + Duration::from_secs(5), ready(6)).await;
+            assert_eq!(Ok(Ok(6)), unfunded);
         });
     }
 }

@@ -14,8 +14,10 @@ use crate::core::raft_msg::install_full_snapshot_request::InstallFullSnapshotReq
 use crate::core::sm;
 use crate::errors::Fatal;
 use crate::errors::RaftError;
+use crate::errors::Unfunded;
 #[cfg(doc)]
 use crate::errors::into_raft_result::IntoRaftResult;
+use crate::proposer::funding::Elapsed;
 use crate::proposer::funding::Shared;
 use crate::raft::AppendEntriesRequest;
 use crate::raft::AppendEntriesResponse;
@@ -308,10 +310,11 @@ where
                 return Ok(res);
             }
 
-            let changed_res = C::timeout_at(timeout_at, log_progress.changed()).await;
-            let changed_res = match changed_res {
-                Ok(changed_res) => changed_res,
-                Err(_) => {
+            // On a sleep charged to the node's funder: refused, it waits no longer, as if it
+            // elapsed.
+            let changed_res = match self.inner.within(timeout_at, log_progress.changed()).await {
+                Ok(Ok(changed_res)) => changed_res,
+                Ok(Err(Elapsed)) | Err(Unfunded) => {
                     let progress = log_progress.get();
                     let res = Self::check_transfer_leader_progress(req, &progress);
                     Self::log_transfer_leader_progress(req, &progress, &res);
