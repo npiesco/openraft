@@ -1,5 +1,4 @@
 use std::collections::BTreeSet;
-use std::sync::Arc;
 use std::time::Duration;
 
 use maplit::btreeset;
@@ -72,10 +71,10 @@ fn seeded_engine(id: u64, config: EngineConfig<SeededConfig>) -> Engine<SeededCo
     engine.config = config;
     engine.state.log_ids = LogIdList::new(None, [seeded_log_id(0, 0, 0)]);
     engine.state.enable_validation(false);
-    engine.state.membership_state.set_effective(Arc::new(StoredMembershipOf::<SeededConfig>::new(
+    engine.state.membership_state.set_effective(StoredMembershipOf::<SeededConfig>::new(
         Some(seeded_log_id(0, 1, 1)),
         m12(),
-    )));
+    ));
     engine
 }
 
@@ -188,10 +187,10 @@ fn test_successful_pre_vote_resamples_the_real_campaign() {
         let config = EngineConfig::new(1, &election_config());
         let initial = config.timer_config.election_timeout;
         let mut engine = seeded_engine(1, config);
-        engine.state.membership_state.set_effective(Arc::new(StoredMembershipOf::<SeededConfig>::new(
+        engine.state.membership_state.set_effective(StoredMembershipOf::<SeededConfig>::new(
             Some(seeded_log_id(0, 1, 1)),
             m1(),
-        )));
+        ));
 
         engine.pre_elect();
 
@@ -209,10 +208,9 @@ fn test_elect_single_node() -> anyhow::Result<()> {
     {
         let mut eng = eng();
         eng.config.id = 1;
-        eng.state.membership_state.set_effective(Arc::new(StoredMembershipOf::<UTConfig>::new(
-            Some(log_id(0, 1, 1)),
-            m1(),
-        )));
+        eng.state
+            .membership_state
+            .set_effective(StoredMembershipOf::<UTConfig>::new(Some(log_id(0, 1, 1)), m1()));
 
         eng.elect();
 
@@ -247,10 +245,9 @@ fn test_elect_by_leadership_transfer_sets_flag() -> anyhow::Result<()> {
     // grant it even when the leader lease has not expired.
     let mut eng = eng();
     eng.config.id = 1;
-    eng.state.membership_state.set_effective(Arc::new(StoredMembershipOf::<UTConfig>::new(
-        Some(log_id(0, 1, 1)),
-        m12(),
-    )));
+    eng.state
+        .membership_state
+        .set_effective(StoredMembershipOf::<UTConfig>::new(Some(log_id(0, 1, 1)), m12()));
 
     eng.elect_by_leadership_transfer();
 
@@ -282,10 +279,9 @@ fn test_elect_again_overrides_previous_campaign() -> anyhow::Result<()> {
     {
         let mut eng = eng();
         eng.config.id = 1;
-        eng.state.membership_state.set_effective(Arc::new(StoredMembershipOf::<UTConfig>::new(
-            Some(log_id(0, 1, 1)),
-            m1(),
-        )));
+        eng.state
+            .membership_state
+            .set_effective(StoredMembershipOf::<UTConfig>::new(Some(log_id(0, 1, 1)), m1()));
 
         // The first campaign, to be overridden by the second one.
         eng.elect();
@@ -324,10 +320,9 @@ fn test_elect_again_overrides_previous_campaign() -> anyhow::Result<()> {
 fn test_election_on_leader_is_ignored() -> anyhow::Result<()> {
     let mut eng = eng();
     eng.config.id = 1;
-    eng.state.membership_state.set_effective(Arc::new(StoredMembershipOf::<UTConfig>::new(
-        Some(log_id(0, 1, 1)),
-        m12(),
-    )));
+    eng.state
+        .membership_state
+        .set_effective(StoredMembershipOf::<UTConfig>::new(Some(log_id(0, 1, 1)), m12()));
 
     eng.elect();
     eng.candidate_mut().unwrap().grant_by(&1);
@@ -356,10 +351,9 @@ fn test_elect_multi_node_enter_candidate() -> anyhow::Result<()> {
     {
         let mut eng = eng();
         eng.config.id = 1;
-        eng.state.membership_state.set_effective(Arc::new(StoredMembershipOf::<UTConfig>::new(
-            Some(log_id(0, 1, 1)),
-            m12(),
-        )));
+        eng.state
+            .membership_state
+            .set_effective(StoredMembershipOf::<UTConfig>::new(Some(log_id(0, 1, 1)), m12()));
         eng.state.log_ids = LogIdList::new(None, vec![log_id(1, 1, 1)]);
 
         eng.elect();
@@ -396,14 +390,14 @@ fn test_elect_removed_committed_voter_uses_effective_quorum() {
     eng.state.log_ids = LogIdList::new(None, [log_id(1, 0, 2)]);
     eng.state.vote = Leased::new(UTConfig::<()>::now(), Duration::ZERO, Vote::new(1, 0));
     eng.state.membership_state = MembershipState::new(
-        Arc::new(StoredMembershipOf::<UTConfig>::new(
+        StoredMembershipOf::<UTConfig>::new(
             Some(log_id(1, 0, 1)),
             Membership::new_with_defaults(vec![btreeset! {1,2,3}], []),
-        )),
-        Arc::new(StoredMembershipOf::<UTConfig>::new(
+        ),
+        StoredMembershipOf::<UTConfig>::new(
             Some(log_id(1, 0, 2)),
             Membership::new_with_defaults(vec![btreeset! {2,3}], []),
-        )),
+        ),
     );
     eng.state.update_local_committed(&Some(log_id(1, 0, 1)));
 

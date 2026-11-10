@@ -1,4 +1,3 @@
-use std::sync::Arc;
 use std::time::Duration;
 
 use maplit::btreeset;
@@ -29,10 +28,9 @@ fn eng() -> Engine<UTConfig> {
     eng.config.id = 0;
     eng.state.vote = Leased::new(UTConfig::<()>::now(), Duration::from_millis(500), Vote::new(2, 1));
     eng.state.server_state = ServerState::Candidate;
-    eng.state.membership_state.set_effective(Arc::new(StoredMembershipOf::<UTConfig>::new(
-        Some(log_id(1, 1, 1)),
-        m01(),
-    )));
+    eng.state
+        .membership_state
+        .set_effective(StoredMembershipOf::<UTConfig>::new(Some(log_id(1, 1, 1)), m01()));
 
     eng.output.take_commands();
     eng
@@ -210,10 +208,10 @@ fn test_become_following_with_no_leading_state_and_membership_demotion() -> anyh
     let mut eng = eng();
     eng.config.id = 2;
     eng.state.server_state = ServerState::Follower;
-    eng.state.membership_state.set_effective(Arc::new(StoredMembershipOf::<UTConfig>::new(
+    eng.state.membership_state.set_effective(StoredMembershipOf::<UTConfig>::new(
         Some(log_id(2, 1, 3)),
         Membership::<u64, ()>::new_with_defaults(vec![btreeset! {1, 3}], vec![1, 2, 3]),
-    )));
+    ));
 
     eng.vote_handler().become_following();
 
@@ -248,7 +246,7 @@ fn test_become_following_active_candidate_emits_close() -> anyhow::Result<()> {
         UTConfig::<()>::now(),
         Vote::new(3, 0),
         None,
-        Arc::new(m01()),
+        m01(),
         vec![],
         eng.state.progress_id_gen.clone(),
     ));
@@ -273,7 +271,7 @@ fn test_become_following_active_pre_candidate_emits_close() -> anyhow::Result<()
         UTConfig::<()>::now(),
         Vote::new(3, 0),
         None,
-        Arc::new(m01()),
+        m01(),
         vec![],
         eng.state.progress_id_gen.clone(),
     ));
@@ -299,7 +297,7 @@ fn test_become_following_invalid_role_combination_emits_single_close() -> anyhow
         UTConfig::<()>::now(),
         Vote::new(3, 0),
         None,
-        Arc::new(m01()),
+        m01(),
         vec![],
         eng.state.progress_id_gen.clone(),
     ));

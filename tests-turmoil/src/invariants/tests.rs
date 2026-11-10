@@ -6,8 +6,6 @@
 //! tests close to the real call site, while the helpers keep the fixtures
 //! readable.
 
-use std::sync::Arc;
-
 use openraft::alias::LogIdListOf;
 use openraft::metrics::RaftMetrics;
 use openraft::vote::RaftLeaderId;
@@ -170,7 +168,7 @@ impl SnapshotBuilder {
             let sets: Vec<std::collections::BTreeSet<NodeId>> =
                 self.membership.into_iter().map(|v| v.into_iter().collect()).collect();
             let mem = openraft::Membership::new_with_defaults(sets, std::iter::empty::<NodeId>());
-            raft.membership_config = Arc::new(StoredMembership::new(self.membership_log_id, mem));
+            raft.membership_config = StoredMembership::new(self.membership_log_id, mem);
         }
 
         let sm = StateMachineData {

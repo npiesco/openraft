@@ -6,7 +6,6 @@
 //!
 //! Gated behind the `bench` feature; not part of the public API.
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use maplit::btreeset;
@@ -42,14 +41,14 @@ impl BenchEngine {
         eng.state.log_ids.append(log_id(1, 1, 1));
         eng.state.log_ids.append(log_id(2, 1, 3));
         eng.state.membership_state = MembershipState::new(
-            Arc::new(StoredMembershipOf::<UTConfig>::new(
+            StoredMembershipOf::<UTConfig>::new(
                 Some(log_id(1, 1, 1)),
                 Membership::<u64, ()>::new_with_defaults(vec![btreeset! {0, 1}], []),
-            )),
-            Arc::new(StoredMembershipOf::<UTConfig>::new(
+            ),
+            StoredMembershipOf::<UTConfig>::new(
                 Some(log_id(2, 1, 3)),
                 Membership::<u64, ()>::new_with_defaults(vec![btreeset! {2, 3}], btreeset! {1, 2, 3}),
-            )),
+            ),
         );
         eng.testing_new_leader();
         eng.state.server_state = eng.calc_server_state();

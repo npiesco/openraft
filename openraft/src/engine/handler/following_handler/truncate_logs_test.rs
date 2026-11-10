@@ -1,4 +1,3 @@
-use std::sync::Arc;
 use std::time::Duration;
 
 use maplit::btreeset;
@@ -41,8 +40,8 @@ fn eng() -> Engine<UTConfig> {
     );
     eng.state.log_ids = LogIdList::new(None, vec![log_id(2, 1, 3), log_id(4, 1, 6)]);
     eng.state.membership_state = MembershipState::new(
-        Arc::new(StoredMembershipOf::<UTConfig>::new(Some(log_id(1, 1, 1)), m01())),
-        Arc::new(StoredMembershipOf::<UTConfig>::new(Some(log_id(2, 1, 3)), m23())),
+        StoredMembershipOf::<UTConfig>::new(Some(log_id(1, 1, 1)), m01()),
+        StoredMembershipOf::<UTConfig>::new(Some(log_id(2, 1, 3)), m23()),
     );
 
     eng.state.server_state = ServerState::Follower;
@@ -61,8 +60,8 @@ fn test_truncate_logs_since_3() -> anyhow::Result<()> {
     assert_eq!(&[log_id(2, 1, 2)], eng.state.log_ids.key_log_ids());
     assert_eq!(
         MembershipState::new(
-            Arc::new(StoredMembershipOf::<UTConfig>::new(Some(log_id(1, 1, 1)), m01())),
-            Arc::new(StoredMembershipOf::<UTConfig>::new(Some(log_id(1, 1, 1)), m01())),
+            StoredMembershipOf::<UTConfig>::new(Some(log_id(1, 1, 1)), m01()),
+            StoredMembershipOf::<UTConfig>::new(Some(log_id(1, 1, 1)), m01()),
         ),
         eng.state.membership_state
     );
@@ -92,8 +91,8 @@ fn test_truncate_logs_since_4() -> anyhow::Result<()> {
     assert_eq!(&[log_id(2, 1, 3)], eng.state.log_ids.key_log_ids());
     assert_eq!(
         MembershipState::new(
-            Arc::new(StoredMembershipOf::<UTConfig>::new(Some(log_id(1, 1, 1)), m01())),
-            Arc::new(StoredMembershipOf::<UTConfig>::new(Some(log_id(2, 1, 3)), m23())),
+            StoredMembershipOf::<UTConfig>::new(Some(log_id(1, 1, 1)), m01()),
+            StoredMembershipOf::<UTConfig>::new(Some(log_id(2, 1, 3)), m23()),
         ),
         eng.state.membership_state
     );
@@ -179,8 +178,8 @@ fn test_truncate_logs_since_8() -> anyhow::Result<()> {
 fn test_truncate_logs_revert_effective_membership() -> anyhow::Result<()> {
     let mut eng = eng();
     eng.state.membership_state = MembershipState::new(
-        Arc::new(StoredMembershipOf::<UTConfig>::new(Some(log_id(2, 1, 3)), m01())),
-        Arc::new(StoredMembershipOf::<UTConfig>::new(Some(log_id(4, 1, 4)), m12())),
+        StoredMembershipOf::<UTConfig>::new(Some(log_id(2, 1, 3)), m01()),
+        StoredMembershipOf::<UTConfig>::new(Some(log_id(4, 1, 4)), m12()),
     );
     eng.state.server_state = eng.calc_server_state();
 

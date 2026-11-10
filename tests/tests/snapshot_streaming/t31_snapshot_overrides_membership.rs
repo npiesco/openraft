@@ -94,7 +94,7 @@ async fn snapshot_overrides_membership() -> Result<()> {
 
                 assert_eq!(
                     &StoredMembershipOf::<openraft_memstore::TypeConfig>::default(),
-                    m.committed().as_ref()
+                    m.committed()
                 );
                 assert_eq!(
                     &Membership::new_with_defaults(vec![btreeset! {2,3}], []),

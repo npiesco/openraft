@@ -1,4 +1,3 @@
-use std::sync::Arc;
 use std::time::Duration;
 
 use maplit::btreeset;
@@ -33,7 +32,7 @@ fn state(
     membership_log_id: Option<LogIdOf<UTConfig>>,
 ) -> RaftState<UTConfig> {
     let membership = Membership::<u64, ()>::new_with_defaults(vec![btreeset! {1,2}], []);
-    let stored = Arc::new(StoredMembershipOf::<UTConfig>::new(membership_log_id, membership));
+    let stored = StoredMembershipOf::<UTConfig>::new(membership_log_id, membership);
 
     RaftState::<UTConfig> {
         vote: Leased::new(UTConfig::<()>::now(), Duration::from_millis(500), vote),

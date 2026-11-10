@@ -1,4 +1,3 @@
-use std::sync::Arc;
 use std::time::Duration;
 
 use maplit::btreeset;
@@ -94,10 +93,10 @@ fn test_wait() {
             let h = UTConfig::<()>::spawn(async move {
                 UTConfig::<()>::sleep(Duration::from_millis(10)).await;
                 let mut update = init.clone();
-                update.membership_config = Arc::new(StoredMembershipOf::<UTConfig>::new(
+                update.membership_config = StoredMembershipOf::<UTConfig>::new(
                     None,
                     Membership::new_with_defaults(vec![btreeset! {1,2}], [3]),
-                ));
+                );
                 let rst = tx.send(update);
                 assert!(rst.is_ok());
             });
@@ -385,8 +384,8 @@ where C: RaftTypeConfig<NodeId = u64> {
         current_leader: None,
         millis_since_quorum_ack: None,
         last_quorum_acked: None,
-        membership_config: Arc::new(StoredMembershipOf::<C>::new(None, Membership::default())),
-        committed_membership_config: Arc::new(StoredMembershipOf::<C>::new(None, Membership::default())),
+        membership_config: StoredMembershipOf::<C>::new(None, Membership::default()),
+        committed_membership_config: StoredMembershipOf::<C>::new(None, Membership::default()),
         heartbeat: None,
 
         snapshot: None,

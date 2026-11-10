@@ -200,7 +200,6 @@ where C: RaftTypeConfig {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
 
     use maplit::btreemap;
     use maplit::btreeset;
@@ -220,8 +219,8 @@ mod tests {
         Membership::new_with_defaults(vec![btreeset! {2,3}], [])
     }
 
-    fn stored(log_index: u64, mem: Membership<u64, ()>) -> Arc<StoredMembershipOf<UTConfig>> {
-        Arc::new(StoredMembershipOf::<UTConfig>::new(Some(log_id(2, 1, log_index)), mem))
+    fn stored(log_index: u64, mem: Membership<u64, ()>) -> StoredMembershipOf<UTConfig> {
+        StoredMembershipOf::<UTConfig>::new(Some(log_id(2, 1, log_index)), mem)
     }
 
     /// Build server metrics of a Leader node 1, with the same effective and committed

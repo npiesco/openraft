@@ -20,7 +20,7 @@ use crate::quorum::QuorumIntersection;
 
 /// The bytes an `Arc<T>` allocates for its block: its strong and weak counts, then the value,
 /// padded to the block's alignment.
-pub(crate) const fn arc_block_bytes<T>() -> usize {
+const fn arc_block_bytes<T>() -> usize {
     let value = align_of::<T>();
     let align = if value > align_of::<usize>() {
         value
@@ -314,10 +314,8 @@ where
     /// and `owner` is released at once.
     ///
     /// The owner accounts for the members' memory, the block they move into
-    /// ([`Self::OWNED_BLOCK_BYTES`]), its own box, and the `Arc` blocks OpenRaft wraps clones of
-    /// it in ([`StoredMembership::OWNED_ARC_BYTES`]).
-    ///
-    /// [`StoredMembership::OWNED_ARC_BYTES`]: crate::StoredMembership::OWNED_ARC_BYTES
+    /// ([`Self::OWNED_BLOCK_BYTES`]) and its own box. OpenRaft holds the clones it keeps by value,
+    /// never in an `Arc` of its own, so nothing it allocates around them outlives the owner.
     pub fn with_owner(self, owner: Box<dyn MembershipOwner>) -> Self {
         match self.repr {
             Repr::Plain(members) => Membership {
@@ -795,7 +793,10 @@ mod tests {
         {
             let res = m().change(ChangeMembers::RemoveVoters(btreeset! {5}), true);
             assert_eq!(
-                Ok(Membership::<u64, ()>::new_unchecked(vec![btreeset! {1,2}], btreemap! {1=>(),2=>(),3=>()})),
+                Ok(Membership::<u64, ()>::new_unchecked(
+                    vec![btreeset! {1,2}],
+                    btreemap! {1=>(),2=>(),3=>()}
+                )),
                 res
             );
         }
@@ -838,7 +839,10 @@ mod tests {
             );
             let res = mem.change(ChangeMembers::RemoveVoters(btreeset! {1}), false);
             assert_eq!(
-                Ok(Membership::<u64, ()>::new_unchecked(vec![btreeset! {2}], btreemap! {2=>(),3=>()})),
+                Ok(Membership::<u64, ()>::new_unchecked(
+                    vec![btreeset! {2}],
+                    btreemap! {2=>(),3=>()}
+                )),
                 res
             );
         }
@@ -859,7 +863,10 @@ mod tests {
         {
             let res = m().change(ChangeMembers::AddNodes(btreemap! {2=>()}), false);
             assert_eq!(
-                Ok(Membership::<u64, ()>::new_unchecked(vec![btreeset! {1,2}], btreemap! {1=>(),2=>(),3=>()})),
+                Ok(Membership::<u64, ()>::new_unchecked(
+                    vec![btreeset! {1,2}],
+                    btreemap! {1=>(),2=>(),3=>()}
+                )),
                 res
             );
         }
@@ -868,7 +875,10 @@ mod tests {
         {
             let res = m().change(ChangeMembers::AddNodes(btreemap! {3=>()}), false);
             assert_eq!(
-                Ok(Membership::<u64, ()>::new_unchecked(vec![btreeset! {1,2}], btreemap! {1=>(),2=>(),3=>()})),
+                Ok(Membership::<u64, ()>::new_unchecked(
+                    vec![btreeset! {1,2}],
+                    btreemap! {1=>(),2=>(),3=>()}
+                )),
                 res
             );
         }
@@ -877,7 +887,10 @@ mod tests {
         {
             let res = m().change(ChangeMembers::AddNodes(btreemap! {4=>()}), false);
             assert_eq!(
-                Ok(Membership::<u64, ()>::new_unchecked(vec![btreeset! {1,2}], btreemap! {1=>(),2=>(),3=>(), 4=>()})),
+                Ok(Membership::<u64, ()>::new_unchecked(
+                    vec![btreeset! {1,2}],
+                    btreemap! {1=>(),2=>(),3=>(), 4=>()}
+                )),
                 res
             );
         }
@@ -888,7 +901,10 @@ mod tests {
 
             let res = m().change(ChangeMembers::SetNodes(btreemap! {3=>30, 4=>40}), false);
             assert_eq!(
-                Ok(Membership::<u64, u64>::new_unchecked(vec![btreeset! {1,2}], btreemap! {1=>1,2=>2,3=>30, 4=>40})),
+                Ok(Membership::<u64, u64>::new_unchecked(
+                    vec![btreeset! {1,2}],
+                    btreemap! {1=>1,2=>2,3=>30, 4=>40}
+                )),
                 res
             );
         }
@@ -907,7 +923,10 @@ mod tests {
         {
             let res = m().change(ChangeMembers::RemoveNodes(btreeset! {3}), false);
             assert_eq!(
-                Ok(Membership::<u64, ()>::new_unchecked(vec![btreeset! {1,2}], btreemap! {1=>(),2=>()})),
+                Ok(Membership::<u64, ()>::new_unchecked(
+                    vec![btreeset! {1,2}],
+                    btreemap! {1=>(),2=>()}
+                )),
                 res
             );
         }
@@ -916,7 +935,10 @@ mod tests {
         {
             let res = m().change(ChangeMembers::ReplaceAllNodes(btreemap! {1=>(),2=>(),4=>()}), false);
             assert_eq!(
-                Ok(Membership::<u64, ()>::new_unchecked(vec![btreeset! {1,2}], btreemap! {1=>(),2=>(),4=>()})),
+                Ok(Membership::<u64, ()>::new_unchecked(
+                    vec![btreeset! {1,2}],
+                    btreemap! {1=>(),2=>(),4=>()}
+                )),
                 res
             );
         }
@@ -951,7 +973,10 @@ mod tests {
 
         let step2 = step1.change(rm_2_add_5(), false)?;
 
-        assert_eq!(step2, Membership::<u64, ()>::new_unchecked(vec![btreeset! {1,5}], btreemap! {1=>(),3=>(), 5=>()}));
+        assert_eq!(
+            step2,
+            Membership::<u64, ()>::new_unchecked(vec![btreeset! {1,5}], btreemap! {1=>(),3=>(), 5=>()})
+        );
 
         Ok(())
     }

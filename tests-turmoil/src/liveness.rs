@@ -104,7 +104,6 @@ pub fn check_converged(snapshots: &[(NodeId, FullNodeSnapshot)]) -> Result<Conve
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
 
     use openraft::ServerState;
     use openraft::metrics::RaftMetrics;
@@ -139,7 +138,7 @@ mod tests {
         let sets: Vec<std::collections::BTreeSet<NodeId>> =
             voters.into_iter().map(|v| v.into_iter().collect()).collect();
         let mem = openraft::Membership::new_with_defaults(sets, learners);
-        raft.membership_config = Arc::new(StoredMembership::new(Some(log_id(1, 1, 1)), mem));
+        raft.membership_config = StoredMembership::new(Some(log_id(1, 1, 1)), mem);
 
         let mut sm = StateMachineData {
             last_applied: applied,

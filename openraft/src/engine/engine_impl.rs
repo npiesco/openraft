@@ -1,4 +1,3 @@
-use std::sync::Arc;
 use std::time::Duration;
 
 use display_more::DisplayOptionExt;
@@ -139,7 +138,7 @@ where
             now,
             vote,
             last_log_id,
-            Arc::new((*membership).clone()),
+            membership.clone(),
             membership.learner_ids(),
             self.state.progress_id_gen.clone(),
         ));
@@ -162,7 +161,7 @@ where
             now,
             vote,
             last_log_id,
-            Arc::new((*membership).clone()),
+            membership.clone(),
             membership.learner_ids(),
             self.state.progress_id_gen.clone(),
         ));

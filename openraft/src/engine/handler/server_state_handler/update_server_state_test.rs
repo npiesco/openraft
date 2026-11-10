@@ -1,4 +1,3 @@
-use std::sync::Arc;
 use std::time::Duration;
 
 use maplit::btreeset;
@@ -34,8 +33,8 @@ fn eng() -> Engine<UTConfig> {
         Vote::new_committed(2, 2),
     );
     eng.state.membership_state = MembershipState::new(
-        Arc::new(StoredMembershipOf::<UTConfig>::new(Some(log_id(1, 1, 1)), m01())),
-        Arc::new(StoredMembershipOf::<UTConfig>::new(Some(log_id(2, 1, 3)), m123())),
+        StoredMembershipOf::<UTConfig>::new(Some(log_id(1, 1, 1)), m01()),
+        StoredMembershipOf::<UTConfig>::new(Some(log_id(2, 1, 3)), m123()),
     );
     eng.state.server_state = eng.state.calc_server_state(&eng.config.id);
 
@@ -59,10 +58,10 @@ fn test_update_server_state_if_changed() -> anyhow::Result<()> {
 
     // A leader kept after it is removed from voters but kept as learner.
     {
-        let effective = Arc::new(StoredMembershipOf::<UTConfig>::new(
+        let effective = StoredMembershipOf::<UTConfig>::new(
             Some(log_id(3, 1, 4)),
             Membership::new_with_defaults(vec![btreeset! {1, 3}], [2]),
-        ));
+        );
         ssh.state.vote = Leased::new(
             UTConfig::<()>::now(),
             Duration::from_millis(500),
@@ -73,11 +72,11 @@ fn test_update_server_state_if_changed() -> anyhow::Result<()> {
         ssh.update_server_state_if_changed();
 
         assert_eq!(
-            (ServerState::Leader, &Vote::new_committed(2, 2), effective.as_ref(),),
+            (ServerState::Leader, &Vote::new_committed(2, 2), &effective,),
             (
                 ssh.state.server_state,
                 ssh.state.vote_ref(),
-                ssh.state.membership_state.effective().as_ref(),
+                ssh.state.membership_state.effective(),
             )
         );
     }

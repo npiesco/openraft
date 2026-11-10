@@ -2803,7 +2803,7 @@ mod tests {
     #[test]
     fn membership_change_replaces_payload_membership() {
         let current = Membership::new_with_defaults(vec![btreeset! {1}], []);
-        let stored = Arc::new(StoredMembershipOf::<TestConfig>::new(None, current));
+        let stored = StoredMembershipOf::<TestConfig>::new(None, current);
         let membership_state = MembershipStateOf::<TestConfig>::new(stored.clone(), stored);
 
         let input_membership = Membership::new_with_defaults(vec![btreeset! {9}], []);
@@ -2828,7 +2828,7 @@ mod tests {
     #[test]
     fn membership_change_from_blank_payload_creates_membership_payload() {
         let current = Membership::new_with_defaults(vec![btreeset! {1}], []);
-        let stored = Arc::new(StoredMembershipOf::<TestConfig>::new(None, current));
+        let stored = StoredMembershipOf::<TestConfig>::new(None, current);
         let membership_state = MembershipStateOf::<TestConfig>::new(stored.clone(), stored);
 
         let payloads = MembershipPayloads::<TestConfig>::Uniform(TestPayload::blank());
@@ -2849,7 +2849,7 @@ mod tests {
     #[test]
     fn joint_membership_selects_joint_payload() {
         let current = Membership::new_with_defaults(vec![btreeset! {1, 2, 3}], btreeset! {4, 5});
-        let stored = Arc::new(StoredMembershipOf::<TestConfig>::new(None, current));
+        let stored = StoredMembershipOf::<TestConfig>::new(None, current);
         let membership_state = MembershipStateOf::<TestConfig>::new(stored.clone(), stored);
 
         let (unused_tx, mut unused_rx) = TestConfig::oneshot();
@@ -2879,7 +2879,7 @@ mod tests {
     #[test]
     fn uniform_membership_selects_uniform_payload() {
         let current = Membership::new_with_defaults(vec![btreeset! {1}], []);
-        let stored = Arc::new(StoredMembershipOf::<TestConfig>::new(None, current));
+        let stored = StoredMembershipOf::<TestConfig>::new(None, current);
         let membership_state = MembershipStateOf::<TestConfig>::new(stored.clone(), stored);
 
         let (unused_tx, mut unused_rx) = TestConfig::oneshot();

@@ -1,4 +1,3 @@
-use std::sync::Arc;
 use std::time::Duration;
 
 use maplit::btreeset;
@@ -29,7 +28,7 @@ fn eng() -> Engine<UTConfig> {
     let membership = Membership::<u64, ()>::new_with_defaults(vec![btreeset! {1, 2, 3}], []);
     let committed = StoredMembershipOf::<UTConfig>::new(Some(log_id(1, 1, 1)), membership.clone());
     let effective = StoredMembershipOf::<UTConfig>::new(Some(log_id(2, 1, 3)), membership);
-    eng.state.membership_state = MembershipState::new(Arc::new(committed), Arc::new(effective));
+    eng.state.membership_state = MembershipState::new(committed, effective);
     eng.testing_new_leader();
     eng.output.clear_commands();
     eng

@@ -13,10 +13,10 @@ use crate::errors::LearnerNotFound;
 use crate::type_config::alias::MembershipStateOf;
 use crate::type_config::alias::StoredMembershipOf;
 
-/// Create an Arc<StoredMembership>
-fn effmem(term: u64, index: u64, m: Membership<u64, ()>) -> Arc<StoredMembershipOf<UTConfig>> {
+/// Create a StoredMembership
+fn effmem(term: u64, index: u64, m: Membership<u64, ()>) -> StoredMembershipOf<UTConfig> {
     let lid = Some(log_id(term, 1, index));
-    Arc::new(StoredMembershipOf::<UTConfig>::new(lid, m))
+    StoredMembershipOf::<UTConfig>::new(lid, m)
 }
 
 fn m1() -> Membership<u64, ()> {

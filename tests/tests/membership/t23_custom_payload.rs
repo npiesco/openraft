@@ -506,9 +506,9 @@ async fn custom_payload_survives_membership_change_and_recovery() -> anyhow::Res
         assert_eq!(expected_state, sm1.state());
 
         let leader_metrics = node0.metrics().borrow_watched().clone();
-        assert_eq!(&expected_state.membership, leader_metrics.membership_config.as_ref());
+        assert_eq!(&expected_state.membership, &leader_metrics.membership_config);
         let follower_metrics = node1.metrics().borrow_watched().clone();
-        assert_eq!(&expected_state.membership, follower_metrics.membership_config.as_ref());
+        assert_eq!(&expected_state.membership, &follower_metrics.membership_config);
     }
 
     let final_joint_membership = Membership::new_with_defaults(vec![btreeset! {0,1}, btreeset! {0}], []);
@@ -617,7 +617,7 @@ async fn custom_payload_survives_membership_change_and_recovery() -> anyhow::Res
 
         assert_eq!(expected_final_state, recovered_sm.state());
         let metrics = recovered.metrics().borrow_watched().clone();
-        assert_eq!(&expected_final_state.membership, metrics.membership_config.as_ref());
+        assert_eq!(&expected_final_state.membership, &metrics.membership_config);
         recovered
     };
 
@@ -639,7 +639,7 @@ async fn custom_payload_survives_membership_change_and_recovery() -> anyhow::Res
 
         assert_eq!(expected_final_state, snapshot_sm.state());
         let metrics = node.metrics().borrow_watched().clone();
-        assert_eq!(&expected_final_state.membership, metrics.membership_config.as_ref());
+        assert_eq!(&expected_final_state.membership, &metrics.membership_config);
         node
     };
 

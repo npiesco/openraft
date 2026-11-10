@@ -25,8 +25,8 @@ fn eng() -> Engine<UTConfig> {
     let mut eng = Engine::testing_default(0);
     eng.state.enable_validation(false); // Disable validation for incomplete state
     eng.state.membership_state = MembershipState::new(
-        StoredMembershipOf::<UTConfig>::new_arc(Some(log_id(1, 0, 1)), m12()),
-        StoredMembershipOf::<UTConfig>::new_arc(Some(log_id(1, 0, 1)), m12()),
+        StoredMembershipOf::<UTConfig>::new(Some(log_id(1, 0, 1)), m12()),
+        StoredMembershipOf::<UTConfig>::new(Some(log_id(1, 0, 1)), m12()),
     );
 
     eng.state.log_ids = LogIdList::new(None, [log_id(0, 0, 0)]);

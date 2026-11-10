@@ -52,7 +52,7 @@ pub fn check(
             }
         };
 
-        let membership = s.raft.membership_config.as_ref();
+        let membership = &s.raft.membership_config;
         let joint_config = membership.membership().get_joint_config();
         let membership_log_index = membership.log_id().map(|id| id.index());
 

@@ -1,5 +1,4 @@
 use std::fmt;
-use std::sync::Arc;
 
 use display_more::DisplayOptionExt;
 use openraft_macros::since;
@@ -189,7 +188,7 @@ pub struct RaftMetrics<C: RaftTypeConfig> {
     pub last_quorum_acked: Option<SerdeInstantOf<C>>,
 
     /// The current membership config of the cluster.
-    pub membership_config: Arc<StoredMembershipOf<C>>,
+    pub membership_config: StoredMembershipOf<C>,
 
     /// The last committed membership config.
     ///
@@ -197,7 +196,7 @@ pub struct RaftMetrics<C: RaftTypeConfig> {
     /// membership config is committed: when the two are equal, the last membership log entry is
     /// committed, i.e., a membership change is fully completed.
     #[since(version = "0.10.0")]
-    pub committed_membership_config: Arc<StoredMembershipOf<C>>,
+    pub committed_membership_config: StoredMembershipOf<C>,
 
     /// Heartbeat metrics. It is Some() only when this node is leader.
     ///
@@ -293,8 +292,8 @@ where C: RaftTypeConfig
             current_leader: None,
             millis_since_quorum_ack: None,
             last_quorum_acked: None,
-            membership_config: Arc::new(StoredMembershipOf::<C>::default()),
-            committed_membership_config: Arc::new(StoredMembershipOf::<C>::default()),
+            membership_config: StoredMembershipOf::<C>::default(),
+            committed_membership_config: StoredMembershipOf::<C>::default(),
             replication: None,
             heartbeat: None,
         }
@@ -451,7 +450,7 @@ pub struct RaftServerMetrics<C: RaftTypeConfig> {
     pub current_leader: Option<C::NodeId>,
 
     /// The current membership configuration.
-    pub membership_config: Arc<StoredMembershipOf<C>>,
+    pub membership_config: StoredMembershipOf<C>,
 
     /// The last committed membership config.
     ///
@@ -459,7 +458,7 @@ pub struct RaftServerMetrics<C: RaftTypeConfig> {
     /// membership config is committed: when the two are equal, the last membership log entry is
     /// committed, i.e., a membership change is fully completed.
     #[since(version = "0.10.0")]
-    pub committed_membership_config: Arc<StoredMembershipOf<C>>,
+    pub committed_membership_config: StoredMembershipOf<C>,
 }
 
 impl<C> fmt::Display for RaftServerMetrics<C>
@@ -498,8 +497,8 @@ where C: RaftTypeConfig
             vote,
             state: Default::default(),
             current_leader: None,
-            membership_config: Arc::new(Default::default()),
-            committed_membership_config: Arc::new(Default::default()),
+            membership_config: Default::default(),
+            committed_membership_config: Default::default(),
         }
     }
 }

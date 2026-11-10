@@ -1,4 +1,3 @@
-use std::sync::Arc;
 use std::time::Duration;
 
 use maplit::btreeset;
@@ -31,10 +30,9 @@ fn eng() -> Engine<UTConfig> {
     eng.state.vote = Leased::new(UTConfig::<()>::now(), Duration::from_millis(0), Vote::new(2, 1));
     eng.state.server_state = ServerState::Follower;
     eng.state.log_ids = LogIdList::new(None, [log_id(1, 1, 1)]);
-    eng.state.membership_state.set_effective(Arc::new(StoredMembershipOf::<UTConfig>::new(
-        Some(log_id(1, 1, 1)),
-        m01(),
-    )));
+    eng.state
+        .membership_state
+        .set_effective(StoredMembershipOf::<UTConfig>::new(Some(log_id(1, 1, 1)), m01()));
     eng.output.take_commands();
 
     eng

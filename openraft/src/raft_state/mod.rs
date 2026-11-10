@@ -1,6 +1,5 @@
 use std::error::Error;
 use std::ops::Deref;
-use std::sync::Arc;
 
 use openraft_macros::since;
 use validit::Valid;
@@ -470,7 +469,7 @@ where C: RaftTypeConfig
 
         Leader::new(
             self.vote_ref().to_committed(),
-            Arc::new((*em).clone()),
+            em.clone(),
             em.learner_ids(),
             last_leader_log_ids,
             self.progress_id_gen.clone(),

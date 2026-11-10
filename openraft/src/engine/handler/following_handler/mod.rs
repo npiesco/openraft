@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use display_more::DisplayOptionExt;
 use display_more::DisplaySliceExt;
 
@@ -201,7 +199,7 @@ where
         // Other membership log can be just ignored.
         for (i, m) in memberships.into_iter().enumerate() {
             tracing::debug!("apply membership config #{} from leader: {}", i, m);
-            self.state.membership_state.append(Arc::new(m));
+            self.state.membership_state.append(m);
         }
 
         tracing::debug!("membership state updated: {}", self.state.membership_state);
@@ -214,9 +212,7 @@ where
     fn membership_install_snapshot(&mut self, membership: StoredMembershipOf<C>, snapshot_last_log_index: u64) {
         tracing::debug!("install membership from snapshot: {}", membership);
 
-        let m = Arc::new(membership);
-
-        self.state.membership_state.install_membership_snapshot(m, snapshot_last_log_index);
+        self.state.membership_state.install_membership_snapshot(membership, snapshot_last_log_index);
 
         self.server_state_handler().update_server_state_if_changed();
     }

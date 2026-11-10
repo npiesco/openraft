@@ -1,4 +1,3 @@
-use std::sync::Arc;
 use std::time::Duration;
 
 use maplit::btreeset;
@@ -46,18 +45,17 @@ fn eng_leader(effective: Membership<u64, ()>, committed: LogIdOf<UTConfig>) -> E
     eng.state.log_ids.append(log_id(2, 1, 3));
 
     // Establish the Leader under joint before appending either final membership.
-    let joint = Arc::new(StoredMembershipOf::<UTConfig>::new(
+    let joint = StoredMembershipOf::<UTConfig>::new(
         Some(log_id(1, 1, 1)),
         Membership::new_with_defaults(vec![btreeset! {1,2}, btreeset! {2,3}], []),
-    ));
+    );
     eng.state.membership_state = MembershipState::new(joint.clone(), joint);
     eng.testing_new_leader();
     eng.state.server_state = eng.calc_server_state();
 
-    eng.state.membership_state.set_effective(Arc::new(StoredMembershipOf::<UTConfig>::new(
-        Some(log_id(2, 1, 3)),
-        effective,
-    )));
+    eng.state
+        .membership_state
+        .set_effective(StoredMembershipOf::<UTConfig>::new(Some(log_id(2, 1, 3)), effective));
     eng.state.update_local_committed(&Some(committed));
     eng.output.clear_commands();
 

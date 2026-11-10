@@ -324,8 +324,8 @@ where
     pub async fn get_membership_initial(mut store: LS, mut sm: SM) -> Result<(), io::Error> {
         let mem_state = StorageHelper::new(&mut store, &mut sm).get_membership().await?;
 
-        assert_eq!(&StoredMembership::default(), mem_state.committed().as_ref());
-        assert_eq!(&StoredMembership::default(), mem_state.effective().as_ref());
+        assert_eq!(&StoredMembership::default(), mem_state.committed());
+        assert_eq!(&StoredMembership::default(), mem_state.effective());
 
         Ok(())
     }
@@ -339,7 +339,7 @@ where
 
             let mem_state = StorageHelper::new(&mut store, &mut sm).get_membership().await?;
 
-            assert_eq!(&StoredMembership::default(), mem_state.committed().as_ref());
+            assert_eq!(&StoredMembership::default(), mem_state.committed());
             assert_eq!(
                 &Membership::new_with_defaults(vec![btreeset! {1,2,3}], []),
                 mem_state.effective().membership(),

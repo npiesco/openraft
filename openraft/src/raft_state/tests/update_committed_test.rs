@@ -1,4 +1,3 @@
-use std::sync::Arc;
 use std::time::Duration;
 
 use maplit::btreeset;
@@ -35,8 +34,8 @@ fn new_state() -> RaftState<UTConfig> {
     );
     state.apply_progress_mut().accept(log_id(1, 1, 1));
     state.membership_state = MembershipState::new(
-        Arc::new(StoredMembershipOf::<UTConfig>::new(Some(log_id(1, 1, 1)), m01())),
-        Arc::new(StoredMembershipOf::<UTConfig>::new(Some(log_id(2, 1, 3)), m23())),
+        StoredMembershipOf::<UTConfig>::new(Some(log_id(1, 1, 1)), m01()),
+        StoredMembershipOf::<UTConfig>::new(Some(log_id(2, 1, 3)), m23()),
     );
     state
 }
@@ -51,8 +50,8 @@ fn test_update_committed_none() -> anyhow::Result<()> {
     assert_eq!(Some(&log_id(1, 1, 1)), state.local_committed());
     assert_eq!(
         MembershipState::new(
-            Arc::new(StoredMembershipOf::<UTConfig>::new(Some(log_id(1, 1, 1)), m01())),
-            Arc::new(StoredMembershipOf::<UTConfig>::new(Some(log_id(2, 1, 3)), m23())),
+            StoredMembershipOf::<UTConfig>::new(Some(log_id(1, 1, 1)), m01()),
+            StoredMembershipOf::<UTConfig>::new(Some(log_id(2, 1, 3)), m23()),
         ),
         state.membership_state
     );
@@ -75,8 +74,8 @@ fn test_update_committed_ge_accepted() -> anyhow::Result<()> {
     assert_eq!(Some(&log_id(1, 1, 2)), state.local_committed());
     assert_eq!(
         MembershipState::new(
-            Arc::new(StoredMembershipOf::<UTConfig>::new(Some(log_id(1, 1, 1)), m01())),
-            Arc::new(StoredMembershipOf::<UTConfig>::new(Some(log_id(2, 1, 3)), m23())),
+            StoredMembershipOf::<UTConfig>::new(Some(log_id(1, 1, 1)), m01()),
+            StoredMembershipOf::<UTConfig>::new(Some(log_id(2, 1, 3)), m23()),
         ),
         state.membership_state
     );
@@ -99,8 +98,8 @@ fn test_update_committed_le_accepted() -> anyhow::Result<()> {
     assert_eq!(Some(&log_id(2, 1, 3)), state.local_committed());
     assert_eq!(
         MembershipState::new(
-            Arc::new(StoredMembershipOf::<UTConfig>::new(Some(log_id(2, 1, 3)), m23())),
-            Arc::new(StoredMembershipOf::<UTConfig>::new(Some(log_id(2, 1, 3)), m23()))
+            StoredMembershipOf::<UTConfig>::new(Some(log_id(2, 1, 3)), m23()),
+            StoredMembershipOf::<UTConfig>::new(Some(log_id(2, 1, 3)), m23())
         ),
         state.membership_state
     );

@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use display_more::DisplayOptionExt;
 use display_more::DisplayResultExt;
 use progress::entry::update::Updater;
@@ -104,9 +102,7 @@ where
             "Only leader is allowed to call update_effective_membership()"
         );
 
-        self.state
-            .membership_state
-            .append(StoredMembershipOf::<C>::new_arc(Some(log_id.clone()), m.clone()));
+        self.state.membership_state.append(StoredMembershipOf::<C>::new(Some(log_id.clone()), m.clone()));
 
         // TODO(9): currently only a leader has replication setup.
         //       It's better to setup replication for both leader and candidate.
@@ -143,7 +139,7 @@ where
             };
 
             self.leader.progress = Valid::new(old_progress.into_inner().upgrade_quorum_set(
-                Arc::new((*em.membership()).clone()),
+                em.membership().clone(),
                 learner_ids.clone(),
                 default_entry,
             ));
@@ -153,7 +149,7 @@ where
             let old_progress = self.leader.clock_progress.clone();
 
             self.leader.clock_progress = Valid::new(old_progress.into_inner().upgrade_quorum_set(
-                Arc::new((*em.membership()).clone()),
+                em.membership().clone(),
                 learner_ids,
                 IdVal::new_default,
             ));

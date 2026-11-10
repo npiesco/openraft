@@ -17,10 +17,10 @@ use crate::raft_state::MembershipState;
 use crate::type_config::alias::MembershipStateOf;
 use crate::type_config::alias::StoredMembershipOf;
 
-/// Create an Arc<StoredMembership>
-fn effmem(term: u64, index: u64, m: Membership<u64, ()>) -> Arc<StoredMembershipOf<UTConfig>> {
+/// Create a StoredMembership
+fn effmem(term: u64, index: u64, m: Membership<u64, ()>) -> StoredMembershipOf<UTConfig> {
     let lid = Some(log_id(term, 1, index));
-    Arc::new(StoredMembershipOf::<UTConfig>::new(lid, m))
+    StoredMembershipOf::<UTConfig>::new(lid, m)
 }
 
 fn m1() -> Membership<u64, ()> {
@@ -100,11 +100,11 @@ fn test_campaign_eligibility_ends_when_removal_commits() {
 fn test_membership_state_update_committed() -> anyhow::Result<()> {
     let new = || {
         MembershipStateOf::<UTConfig>::new(
-            Arc::new(StoredMembershipOf::<UTConfig>::new(Some(log_id(2, 1, 2)), m1())),
-            Arc::new(StoredMembershipOf::<UTConfig>::new(Some(log_id(3, 1, 4)), m123_345())),
+            StoredMembershipOf::<UTConfig>::new(Some(log_id(2, 1, 2)), m1()),
+            StoredMembershipOf::<UTConfig>::new(Some(log_id(3, 1, 4)), m123_345()),
         )
     };
-    let stored = |log_id, membership| Arc::new(StoredMembershipOf::<UTConfig>::new(Some(log_id), membership));
+    let stored = |log_id, membership| StoredMembershipOf::<UTConfig>::new(Some(log_id), membership);
 
     // Smaller new committed won't take effect.
     {
@@ -308,7 +308,7 @@ fn committed_state(m: Membership<u64, ()>) -> MembershipStateOf<UTConfig> {
 
 /// The same as [`committed_state`], for a `Node` type that carries metadata.
 fn committed_node_state(m: Membership<u64, BasicNode>) -> MembershipState<UtClid, u64, BasicNode> {
-    let stored = Arc::new(StoredMembership::new(Some(log_id(3, 1, 4)), m));
+    let stored = StoredMembership::new(Some(log_id(3, 1, 4)), m);
     MembershipState::new(stored.clone(), stored)
 }
 

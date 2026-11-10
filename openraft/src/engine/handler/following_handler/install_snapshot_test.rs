@@ -1,4 +1,3 @@
-use std::sync::Arc;
 use std::time::Duration;
 
 use maplit::btreeset;
@@ -152,7 +151,7 @@ fn test_install_snapshot_not_conflict() -> anyhow::Result<()> {
     assert_eq!(&[log_id(4, 1, 8)], eng.state.log_ids.key_log_ids());
     assert_eq!(Some(&log_id(4, 1, 6)), eng.state.local_committed());
     assert_eq!(
-        &Arc::new(StoredMembershipOf::<UTConfig>::new(Some(log_id(1, 1, 1)), m1234())),
+        &StoredMembershipOf::<UTConfig>::new(Some(log_id(1, 1, 1)), m1234()),
         eng.state.membership_state.committed()
     );
     assert_eq!(
@@ -189,8 +188,8 @@ fn test_install_snapshot_resets_purged_effective_membership() -> anyhow::Result<
         Vote::new_committed(5, 1),
     );
     eng.state.membership_state = MembershipState::new(
-        Arc::new(StoredMembershipOf::<UTConfig>::new(Some(log_id(1, 1, 1)), m12())),
-        Arc::new(StoredMembershipOf::<UTConfig>::new(Some(log_id(4, 1, 8)), m1234())),
+        StoredMembershipOf::<UTConfig>::new(Some(log_id(1, 1, 1)), m12()),
+        StoredMembershipOf::<UTConfig>::new(Some(log_id(4, 1, 8)), m1234()),
     );
     eng.state.server_state = eng.calc_server_state();
 
@@ -209,7 +208,7 @@ fn test_install_snapshot_resets_purged_effective_membership() -> anyhow::Result<
         cond
     );
 
-    let expected_membership = Arc::new(snapshot_membership);
+    let expected_membership = snapshot_membership;
     assert_eq!(
         MembershipState::new(expected_membership.clone(), expected_membership),
         eng.state.membership_state
@@ -236,8 +235,8 @@ fn test_install_snapshot_resets_purged_effective_without_truncating() -> anyhow:
         log_id(5, 1, 9),
     ]);
     eng.state.membership_state = MembershipState::new(
-        Arc::new(StoredMembershipOf::<UTConfig>::new(Some(log_id(1, 1, 1)), m12())),
-        Arc::new(StoredMembershipOf::<UTConfig>::new(Some(log_id(4, 1, 8)), m1234())),
+        StoredMembershipOf::<UTConfig>::new(Some(log_id(1, 1, 1)), m12()),
+        StoredMembershipOf::<UTConfig>::new(Some(log_id(4, 1, 8)), m1234()),
     );
     eng.state.server_state = eng.calc_server_state();
 
@@ -256,7 +255,7 @@ fn test_install_snapshot_resets_purged_effective_without_truncating() -> anyhow:
         cond
     );
 
-    let expected_membership = Arc::new(snapshot_membership);
+    let expected_membership = snapshot_membership;
     assert_eq!(
         MembershipState::new(expected_membership.clone(), expected_membership),
         eng.state.membership_state
@@ -339,7 +338,7 @@ fn test_install_snapshot_conflict() -> anyhow::Result<()> {
     assert_eq!(Some(&log_id(5, 1, 6)), eng.state.log_ids.purged());
     assert_eq!(Some(&log_id(5, 1, 6)), eng.state.local_committed());
     assert_eq!(
-        &Arc::new(StoredMembershipOf::<UTConfig>::new(Some(log_id(1, 1, 1)), m1234())),
+        &StoredMembershipOf::<UTConfig>::new(Some(log_id(1, 1, 1)), m1234()),
         eng.state.membership_state.committed()
     );
     assert_eq!(
@@ -404,11 +403,11 @@ fn test_install_snapshot_advance_last_log_id() -> anyhow::Result<()> {
     assert_eq!(Some(&log_id(100, 1, 100)), eng.state.log_ids.purged());
     assert_eq!(Some(&log_id(100, 1, 100)), eng.state.local_committed());
     assert_eq!(
-        &Arc::new(StoredMembershipOf::<UTConfig>::new(Some(log_id(1, 1, 1)), m1234())),
+        &StoredMembershipOf::<UTConfig>::new(Some(log_id(1, 1, 1)), m1234()),
         eng.state.membership_state.committed()
     );
     assert_eq!(
-        &Arc::new(StoredMembershipOf::<UTConfig>::new(Some(log_id(1, 1, 1)), m1234())),
+        &StoredMembershipOf::<UTConfig>::new(Some(log_id(1, 1, 1)), m1234()),
         eng.state.membership_state.effective()
     );
     assert_eq!(

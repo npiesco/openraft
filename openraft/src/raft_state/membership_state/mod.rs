@@ -1,6 +1,5 @@
 use std::error::Error;
 use std::fmt;
-use std::sync::Arc;
 
 use openraft_macros::since;
 use validit::Validate;
@@ -63,10 +62,12 @@ where
     NID: NodeId,
     N: Node,
 {
-    committed: Arc<StoredMembership<CLID, NID, N>>,
+    committed: StoredMembership<CLID, NID, N>,
 
-    // Using `Arc` because the effective membership will be copied to RaftMetrics frequently.
-    effective: Arc<StoredMembership<CLID, NID, N>>,
+    // Held by value, never in an `Arc`: a membership whose memory an owner accounts for
+    // (`Membership::with_owner`) is copied to RaftMetrics without allocating, and an `Arc` block
+    // around it would be freed only after its owner, released with the last clone, is.
+    effective: StoredMembership<CLID, NID, N>,
 }
 
 impl<CLID, NID, N> Default for MembershipState<CLID, NID, N>
@@ -77,8 +78,8 @@ where
 {
     fn default() -> Self {
         Self {
-            committed: Arc::new(StoredMembership::default()),
-            effective: Arc::new(StoredMembership::default()),
+            committed: StoredMembership::default(),
+            effective: StoredMembership::default(),
         }
     }
 }
@@ -104,10 +105,7 @@ where
     NID: NodeId,
     N: Node,
 {
-    pub(crate) fn new(
-        committed: Arc<StoredMembership<CLID, NID, N>>,
-        effective: Arc<StoredMembership<CLID, NID, N>>,
-    ) -> Self {
+    pub(crate) fn new(committed: StoredMembership<CLID, NID, N>, effective: StoredMembership<CLID, NID, N>) -> Self {
         Self { committed, effective }
     }
 
@@ -236,7 +234,7 @@ where
     /// corresponding local membership.
     pub(crate) fn install_membership_snapshot(
         &mut self,
-        membership_snapshot: Arc<StoredMembership<CLID, NID, N>>,
+        membership_snapshot: StoredMembership<CLID, NID, N>,
         snapshot_last_log_index: u64,
     ) {
         // Snapshot install purges every log entry up to snapshot_last_log_index.
@@ -276,7 +274,7 @@ where
     /// - Leader appends a new membership,
     /// - Or a follower has confirmed preceding logs matches the leaders' and appends membership
     ///   received from the leader.
-    pub(crate) fn append(&mut self, m: Arc<StoredMembership<CLID, NID, N>>) {
+    pub(crate) fn append(&mut self, m: StoredMembership<CLID, NID, N>) {
         debug_assert!(
             m.log_id() > self.effective.log_id(),
             "new membership has to have a greater log_id"
@@ -310,7 +308,7 @@ where
     /// |                                    last membership      // before deleting since..
     /// last membership                                           // after  deleting since..
     /// ```
-    pub(crate) fn truncate(&mut self, since: u64) -> Option<Arc<StoredMembership<CLID, NID, N>>> {
+    pub(crate) fn truncate(&mut self, since: u64) -> Option<StoredMembership<CLID, NID, N>> {
         debug_assert!(
             since >= self.committed().log_id().next_index(),
             "committed log should never be truncated: committed membership cannot conflict with the leader"
@@ -331,14 +329,14 @@ where
 
     // This method is only used by tests
     #[cfg(test)]
-    pub(crate) fn set_effective(&mut self, e: Arc<StoredMembership<CLID, NID, N>>) {
+    pub(crate) fn set_effective(&mut self, e: StoredMembership<CLID, NID, N>) {
         self.effective = e
     }
 
     /// Returns a reference to the last committed membership config.
     ///
     /// A committed membership config may or may not be the same as the effective one.
-    pub fn committed(&self) -> &Arc<StoredMembership<CLID, NID, N>> {
+    pub fn committed(&self) -> &StoredMembership<CLID, NID, N> {
         &self.committed
     }
 
@@ -348,7 +346,7 @@ where
     /// one.
     ///
     /// A committed membership config may or may not be the same as the effective one.
-    pub fn effective(&self) -> &Arc<StoredMembership<CLID, NID, N>> {
+    pub fn effective(&self) -> &StoredMembership<CLID, NID, N> {
         &self.effective
     }
 }

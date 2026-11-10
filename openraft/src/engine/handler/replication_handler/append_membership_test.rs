@@ -1,4 +1,3 @@
-use std::sync::Arc;
 use std::time::Duration;
 
 use maplit::btreeset;
@@ -49,8 +48,8 @@ fn eng() -> Engine<UTConfig> {
     let mut eng = Engine::testing_default(0);
     eng.config.id = 2;
     eng.state.membership_state = MembershipState::new(
-        Arc::new(StoredMembershipOf::<UTConfig>::new(Some(log_id(1, 1, 1)), m01())),
-        Arc::new(StoredMembershipOf::<UTConfig>::new(Some(log_id(2, 1, 3)), m23())),
+        StoredMembershipOf::<UTConfig>::new(Some(log_id(1, 1, 1)), m01()),
+        StoredMembershipOf::<UTConfig>::new(Some(log_id(2, 1, 3)), m23()),
     );
     eng.state.vote = Leased::new(
         UTConfig::<()>::now(),
@@ -72,8 +71,8 @@ fn test_leader_append_membership_for_leader() -> anyhow::Result<()> {
 
     assert_eq!(
         MembershipState::new(
-            Arc::new(StoredMembershipOf::<UTConfig>::new(Some(log_id(2, 1, 3)), m23())),
-            Arc::new(StoredMembershipOf::<UTConfig>::new(Some(log_id(3, 1, 4)), m34()))
+            StoredMembershipOf::<UTConfig>::new(Some(log_id(2, 1, 3)), m23()),
+            StoredMembershipOf::<UTConfig>::new(Some(log_id(3, 1, 4)), m34())
         ),
         eng.state.membership_state
     );
@@ -139,10 +138,9 @@ fn test_leader_append_membership_update_learner_process() -> anyhow::Result<()> 
     // This preserves the original ranges: (1,1) covers indices 1-9, (5,1) covers index 10
     eng.state.log_ids = LogIdList::new(None, [log_id(0, 0, 0), log_id(1, 1, 9), log_id(5, 1, 10)]);
 
-    eng.state.membership_state.set_effective(Arc::new(StoredMembershipOf::<UTConfig>::new(
-        Some(log_id(2, 1, 3)),
-        m23_45(),
-    )));
+    eng.state
+        .membership_state
+        .set_effective(StoredMembershipOf::<UTConfig>::new(Some(log_id(2, 1, 3)), m23_45()));
 
     // Make it a real leader: voted for itself and vote is committed.
     eng.testing_new_leader();
@@ -176,8 +174,8 @@ fn test_leader_append_membership_update_learner_process() -> anyhow::Result<()> 
 
     assert_eq!(
         MembershipState::new(
-            Arc::new(StoredMembershipOf::<UTConfig>::new(Some(log_id(2, 1, 3)), m23_45())),
-            Arc::new(StoredMembershipOf::<UTConfig>::new(Some(log_id(3, 1, 4)), m4_356()))
+            StoredMembershipOf::<UTConfig>::new(Some(log_id(2, 1, 3)), m23_45()),
+            StoredMembershipOf::<UTConfig>::new(Some(log_id(3, 1, 4)), m4_356())
         ),
         eng.state.membership_state
     );

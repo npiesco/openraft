@@ -1,5 +1,4 @@
 use std::marker::PhantomData;
-use std::sync::Arc;
 use std::time::Duration;
 
 use display_more::DisplayOptionExt;
@@ -361,10 +360,7 @@ where
 
         // There 2 membership configs in logs.
         if log_mem.len() == 2 {
-            return Ok(MembershipStateOf::<C>::new(
-                Arc::new(log_mem[0].clone()),
-                Arc::new(log_mem[1].clone()),
-            ));
+            return Ok(MembershipStateOf::<C>::new(log_mem[0].clone(), log_mem[1].clone()));
         }
 
         let effective = if log_mem.is_empty() {
@@ -373,7 +369,7 @@ where
             log_mem[0].clone()
         };
 
-        let res = MembershipStateOf::<C>::new(Arc::new(sm_mem), Arc::new(effective));
+        let res = MembershipStateOf::<C>::new(sm_mem, effective);
 
         Ok(res)
     }

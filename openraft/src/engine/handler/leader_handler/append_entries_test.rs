@@ -1,4 +1,3 @@
-use std::sync::Arc;
 use std::time::Duration;
 
 use maplit::btreeset;
@@ -65,8 +64,8 @@ fn eng() -> Engine<UTConfig> {
     eng.state.log_ids.append(log_id(1, 1, 1));
     eng.state.log_ids.append(log_id(2, 1, 3));
     eng.state.membership_state = MembershipState::new(
-        Arc::new(StoredMembershipOf::<UTConfig>::new(Some(log_id(1, 1, 1)), m01())),
-        Arc::new(StoredMembershipOf::<UTConfig>::new(Some(log_id(2, 1, 3)), m23())),
+        StoredMembershipOf::<UTConfig>::new(Some(log_id(1, 1, 1)), m01()),
+        StoredMembershipOf::<UTConfig>::new(Some(log_id(2, 1, 3)), m23()),
     );
     eng.testing_new_leader();
     eng.state.server_state = eng.calc_server_state();
@@ -98,8 +97,8 @@ fn test_leader_append_entries_empty() -> anyhow::Result<()> {
     assert_eq!(Some(&log_id(2, 1, 3)), eng.state.last_log_id());
     assert_eq!(
         MembershipState::new(
-            Arc::new(StoredMembershipOf::<UTConfig>::new(Some(log_id(1, 1, 1)), m01())),
-            Arc::new(StoredMembershipOf::<UTConfig>::new(Some(log_id(2, 1, 3)), m23())),
+            StoredMembershipOf::<UTConfig>::new(Some(log_id(1, 1, 1)), m01()),
+            StoredMembershipOf::<UTConfig>::new(Some(log_id(2, 1, 3)), m23()),
         ),
         eng.state.membership_state
     );
@@ -140,8 +139,8 @@ fn test_leader_append_entries_normal() -> anyhow::Result<()> {
     assert_eq!(Some(&log_id(3, 1, 6)), eng.state.last_log_id());
     assert_eq!(
         MembershipState::new(
-            Arc::new(StoredMembershipOf::<UTConfig>::new(Some(log_id(1, 1, 1)), m01())),
-            Arc::new(StoredMembershipOf::<UTConfig>::new(Some(log_id(2, 1, 3)), m23())),
+            StoredMembershipOf::<UTConfig>::new(Some(log_id(1, 1, 1)), m01()),
+            StoredMembershipOf::<UTConfig>::new(Some(log_id(2, 1, 3)), m23()),
         ),
         eng.state.membership_state
     );
@@ -173,10 +172,9 @@ fn test_leader_append_entries_normal() -> anyhow::Result<()> {
 #[test]
 fn test_leader_append_entries_single_node_leader() -> anyhow::Result<()> {
     let mut eng = eng();
-    eng.state.membership_state.set_effective(Arc::new(StoredMembershipOf::<UTConfig>::new(
-        Some(log_id(2, 1, 3)),
-        m1(),
-    )));
+    eng.state
+        .membership_state
+        .set_effective(StoredMembershipOf::<UTConfig>::new(Some(log_id(2, 1, 3)), m1()));
     eng.testing_new_leader();
 
     eng.output.clear_commands();
@@ -208,8 +206,8 @@ fn test_leader_append_entries_single_node_leader() -> anyhow::Result<()> {
     assert_eq!(Some(&log_id(3, 1, 6)), eng.state.last_log_id());
     assert_eq!(
         MembershipState::new(
-            Arc::new(StoredMembershipOf::<UTConfig>::new(Some(log_id(1, 1, 1)), m01())),
-            Arc::new(StoredMembershipOf::<UTConfig>::new(Some(log_id(2, 1, 3)), m1())),
+            StoredMembershipOf::<UTConfig>::new(Some(log_id(1, 1, 1)), m01()),
+            StoredMembershipOf::<UTConfig>::new(Some(log_id(2, 1, 3)), m1()),
         ),
         eng.state.membership_state
     );
@@ -232,10 +230,9 @@ fn test_leader_append_entries_single_node_leader() -> anyhow::Result<()> {
 #[test]
 fn test_leader_append_entries_with_membership_log() -> anyhow::Result<()> {
     let mut eng = eng();
-    eng.state.membership_state.set_effective(Arc::new(StoredMembershipOf::<UTConfig>::new(
-        Some(log_id(2, 1, 3)),
-        m1(),
-    )));
+    eng.state
+        .membership_state
+        .set_effective(StoredMembershipOf::<UTConfig>::new(Some(log_id(2, 1, 3)), m1()));
     eng.testing_new_leader();
     eng.state.server_state = eng.calc_server_state();
 
@@ -268,8 +265,8 @@ fn test_leader_append_entries_with_membership_log() -> anyhow::Result<()> {
     assert_eq!(Some(&log_id(3, 1, 6)), eng.state.last_log_id());
     assert_eq!(
         MembershipState::new(
-            Arc::new(StoredMembershipOf::<UTConfig>::new(Some(log_id(2, 1, 3)), m1())),
-            Arc::new(StoredMembershipOf::<UTConfig>::new(Some(log_id(3, 1, 5)), m1_2())),
+            StoredMembershipOf::<UTConfig>::new(Some(log_id(2, 1, 3)), m1()),
+            StoredMembershipOf::<UTConfig>::new(Some(log_id(3, 1, 5)), m1_2()),
         ),
         eng.state.membership_state
     );
