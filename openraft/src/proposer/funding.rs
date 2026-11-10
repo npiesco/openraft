@@ -40,6 +40,23 @@ impl Funding {
             Some(funder) => Charge::take(funder, bytes).map(Some).ok_or(Unfunded),
         }
     }
+
+    /// Whether the node has a funder its allocations are charged to.
+    pub(crate) fn is_funded(&self) -> bool {
+        self.0.is_some()
+    }
+}
+
+/// `more` joined to the charge `held` holds, credited back with it.
+pub(crate) fn merge(held: &mut Option<Charge>, more: Option<Charge>) {
+    let Some(more) = more else {
+        return;
+    };
+    if let Some(charge) = held.as_mut() {
+        charge.merge(more);
+    } else {
+        *held = Some(more);
+    }
 }
 
 impl PartialEq for Funding {

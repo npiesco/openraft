@@ -62,11 +62,23 @@ impl Charge {
             funder: self.funder.clone(),
         })
     }
+
+    /// `other`, charged to the same funder, joined to this charge: its bytes are credited back
+    /// when this is dropped, and no longer when `other` is. Allocates nothing.
+    pub fn merge(&mut self, mut other: Charge) {
+        debug_assert!(
+            Arc::ptr_eq(&self.funder, &other.funder),
+            "merged a charge from another funder"
+        );
+        self.bytes += std::mem::take(&mut other.bytes);
+    }
 }
 
 impl Drop for Charge {
     fn drop(&mut self) {
-        self.funder.release(self.bytes);
+        if self.bytes > 0 {
+            self.funder.release(self.bytes);
+        }
     }
 }
 

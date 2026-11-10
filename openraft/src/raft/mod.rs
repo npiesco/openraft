@@ -625,8 +625,8 @@ where
 
                     engine,
 
-                    // initially, allocate for 8 kilo outstanding requests.
-                    client_responders: ClientResponderQueue::with_capacity(1024 * 8),
+                    // Grown as writes reserve room for their responders, each growth charged.
+                    client_responders: ClientResponderQueue::new(),
 
                     pending_reads: PendingReadQueue::default(),
                     pending_read_deadline_notifier: PendingReadDeadlineNotifier::spawn(tx_notify.clone()),

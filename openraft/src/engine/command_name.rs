@@ -178,7 +178,7 @@ mod tests {
         assert_eq!(cmd.name(), SMCommandName::BuildSnapshot);
 
         // Apply
-        let cmd: sm::Command<C> = sm::Command::apply(log_id(1, 0, 1), log_id(1, 0, 2), vec![]);
+        let cmd: sm::Command<C> = sm::Command::apply(log_id(1, 0, 1), log_id(1, 0, 2), vec![], None);
         assert_eq!(cmd.name(), SMCommandName::Apply);
 
         // GetSnapshot and InstallFullSnapshot require channels/data
@@ -189,7 +189,7 @@ mod tests {
         assert_eq!(cmd.name(), CommandName::StateMachine(SMCommandName::BuildSnapshot));
 
         let cmd: Command<C> = Command::StateMachine {
-            command: sm::Command::apply(log_id(1, 0, 1), log_id(1, 0, 2), vec![]),
+            command: sm::Command::apply(log_id(1, 0, 1), log_id(1, 0, 2), vec![], None),
         };
         assert_eq!(cmd.name(), CommandName::StateMachine(SMCommandName::Apply));
     }

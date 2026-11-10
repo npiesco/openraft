@@ -523,7 +523,7 @@ where
         preconditions: BatchOf<C, Precondition<C>>,
         tx: ProgressResponder<C, ClientWriteResult<C>>,
     ) {
-        let lh = match self.ensure_writable_leader_handler() {
+        let lh = match Self::writable_leader_handler(&mut self.engine) {
             Ok(lh) => lh,
             Err(forward) => {
                 tx.on_complete(Err(ClientWriteError::ForwardToLeader(forward)));
@@ -604,7 +604,12 @@ where
     /// - This node is not the leader
     /// - The leader is transferring leadership to another node
     fn ensure_leader_handler(&mut self) -> Result<LeaderHandler<'_, C, SM>, ForwardToLeader<C>> {
-        let lh = self.engine.try_leader_handler()?;
+        Self::leader_handler_of(&mut self.engine)
+    }
+
+    /// [`ensure_leader_handler`](Self::ensure_leader_handler), borrowing only `engine`.
+    fn leader_handler_of(engine: &mut Engine<C, SM>) -> Result<LeaderHandler<'_, C, SM>, ForwardToLeader<C>> {
+        let lh = engine.try_leader_handler()?;
 
         // If the leader is transferring leadership, forward requests to the new leader.
         if let Some(to) = lh.leader.get_transfer_to() {
@@ -615,9 +620,10 @@ where
         Ok(lh)
     }
 
-    /// Ensure this node has a valid leader lease and may accept new writes.
-    fn ensure_writable_leader_handler(&mut self) -> Result<LeaderHandler<'_, C, SM>, ForwardToLeader<C>> {
-        let lh = self.ensure_leader_handler()?;
+    /// Ensure this node has a valid leader lease and may accept new writes. Borrows only
+    /// `engine`, so that the core's other state stays free beside the handler.
+    fn writable_leader_handler(engine: &mut Engine<C, SM>) -> Result<LeaderHandler<'_, C, SM>, ForwardToLeader<C>> {
+        let lh = Self::leader_handler_of(engine)?;
 
         if !lh.is_lease_valid() {
             return Err(ForwardToLeader::empty().with_reason(ForwardReason::LeaseExpired));
@@ -656,7 +662,7 @@ where
 
         tracing::debug!("write {} entries", payloads.len());
 
-        let mut lh = match self.ensure_writable_leader_handler() {
+        let mut lh = match Self::writable_leader_handler(&mut self.engine) {
             Ok(lh) => lh,
             Err(forward_err) => {
                 let err = ClientWriteError::ForwardToLeader(forward_err);
@@ -678,6 +684,15 @@ where
                 return None;
             }
         };
+
+        // Room for the responders, charged before any entry is appended: refused, none is.
+        let waiting = responders.as_ref().iter().filter(|tx| tx.is_some()).count();
+        if let Err(unfunded) = self.client_responders.reserve(waiting, &lh.config.funding) {
+            for tx in responders.into_iter().flatten() {
+                tx.on_complete(Err(ClientWriteError::Unfunded(unfunded)))
+            }
+            return None;
+        }
 
         let entry_count = payloads.len() as u64;
         let log_ids = lh.leader_append_entries(payloads, funded)?;
@@ -1124,8 +1139,9 @@ where
             );
         }
 
-        // Drain responders up to last.index
-        let mut responders = self.client_responders.drain_upto(last.index());
+        // Drain responders up to last.index, with the charge for the vector they are drained
+        // into, which the state machine worker holds until that vector is freed.
+        let (mut responders, slots) = self.client_responders.drain_upto(last.index());
 
         let entry_count = last.index() + 1 - first.index();
         self.runtime_stats.apply_batch.record(entry_count);
@@ -1141,7 +1157,7 @@ where
             responder.on_commit(log_id);
         }
 
-        let cmd = sm::Command::apply(first, last.clone(), responders);
+        let cmd = sm::Command::apply(first, last.clone(), responders, slots);
         self.sm_handle.send(cmd).await.map_err(|e| StorageError::apply(last, C::err_from_string(e)))?;
 
         Ok(())
@@ -1250,8 +1266,12 @@ where
         self.send_satisfied_responds();
 
         loop {
-            // Batch commands for better I/O performance (e.g., merge consecutive AppendEntries)
-            self.engine.output.sched_commands(&self.config);
+            // Batch commands for better I/O performance (e.g., merge consecutive AppendEntries).
+            // Not on a funded node: merging grows one command's entries into a buffer nothing
+            // was charged for, so each command is appended with the entries it was funded with.
+            if !self.engine.config.funding.is_funded() {
+                self.engine.output.sched_commands(&self.config);
+            }
 
             let Some(cmd) = self.engine.output.pop_command() else {
                 break;
@@ -2490,7 +2510,8 @@ where
         // the purge boundary (which would later panic in `apply_to_state_machine`).
         let leader_id = self.current_leader();
         let leader_node = self.get_leader_node(leader_id.clone());
-        for (log_index, tx) in self.client_responders.drain_upto(upto.index()) {
+        let (purged, slots) = self.client_responders.drain_upto(upto.index());
+        for (log_index, tx) in purged {
             tx.on_complete(Err(ClientWriteError::LogEntryDiscarded(ForwardToLeader {
                 leader_id: leader_id.clone(),
                 leader_node: leader_node.clone(),
@@ -2498,6 +2519,8 @@ where
             })));
             tracing::debug!("sent LogEntryDiscarded for purged log_index: {}", log_index);
         }
+        // Credited back once the vector the purged responders were drained into is freed.
+        drop(slots);
 
         self.engine.state.io_state_mut().update_purged(Some(upto));
 

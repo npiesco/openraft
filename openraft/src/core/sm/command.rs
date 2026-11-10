@@ -3,6 +3,7 @@ use std::fmt::Debug;
 use std::fmt::Formatter;
 
 use crate::RaftTypeConfig;
+use crate::async_runtime::Charge;
 use crate::base::BoxAsyncOnceMut;
 use crate::engine::SMCommandName;
 use crate::raft::responder::core_responder::CoreResponder;
@@ -47,6 +48,10 @@ where
         /// Client responders as a vector of (log_index, responder) pairs.
         /// The vector is sorted by log_index in ascending order.
         client_resp_channels: Vec<(u64, CoreResponder<C>)>,
+
+        /// What the vector of `client_resp_channels` is charged, declared after it: credited
+        /// back only once the vector is freed.
+        slots: Option<Charge>,
     },
 
     /// Apply a typed function to the state machine.
@@ -88,11 +93,13 @@ where
         first: LogIdOf<C>,
         last: LogIdOf<C>,
         client_resp_channels: Vec<(u64, CoreResponder<C>)>,
+        slots: Option<Charge>,
     ) -> Self {
         Command::Apply {
             first,
             last,
             client_resp_channels,
+            slots,
         }
     }
 

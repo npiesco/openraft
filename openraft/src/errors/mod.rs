@@ -99,6 +99,7 @@ pub enum InstallSnapshotError {}
 
 /// An error related to a client write request.
 #[since(version = "0.10.0", change = "added `LogEntryDiscarded`")]
+#[since(version = "0.10.0", change = "added `Unfunded`")]
 #[derive(Debug, Clone, thiserror::Error, derive_more::TryInto)]
 #[derive(PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize), serde(bound = ""))]
@@ -129,6 +130,12 @@ where C: RaftTypeConfig
     #[since(version = "0.10.0")]
     #[error(transparent)]
     PreconditionFailed(#[from] PreconditionFailed<C>),
+
+    /// The node's funder refused what the write's responder takes while it waits, so nothing of
+    /// the write was appended; it can be retried once the funder has room.
+    #[since(version = "0.10.0")]
+    #[error(transparent)]
+    Unfunded(Unfunded),
 }
 
 impl<C> TryAsRef<ForwardToLeader<C>> for ClientWriteError<C>

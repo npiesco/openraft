@@ -148,8 +148,11 @@ where
                     first,
                     last,
                     client_resp_channels,
+                    slots,
                 } => {
                     let resp = self.apply(first, last, client_resp_channels).await?;
+                    // The responders' vector was freed when `apply` returned.
+                    drop(slots);
                     let res = CommandResult::new(Ok(Response::Apply(resp)));
                     self.resp_tx.send(Notification::sm(res)).await.ok();
                 }
@@ -171,10 +174,9 @@ where
         let end = last.index() + 1;
 
         #[cfg(debug_assertions)]
-        let (got_last_index, last_apply) = {
-            let l = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-            (l.clone(), l)
-        };
+        let got_last_index = std::sync::atomic::AtomicU64::new(0);
+        #[cfg(debug_assertions)]
+        let last_apply = &got_last_index;
 
         let strm = self.log_reader.entries_stream(since..end).await;
 
@@ -204,7 +206,12 @@ where
             (ent, responder)
         });
 
-        self.state_machine.apply(Box::pin(strm)).await.sto_apply(last.clone())?;
+        // Pinned in place rather than boxed: applying allocates no stream of its own. The
+        // stream, and the responders' vector it consumes, are freed when this block ends.
+        {
+            let strm = std::pin::pin!(strm);
+            self.state_machine.apply(strm).await.sto_apply(last.clone())?;
+        }
 
         #[cfg(debug_assertions)]
         {

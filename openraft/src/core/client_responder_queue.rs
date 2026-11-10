@@ -3,10 +3,19 @@
 
 use std::collections::VecDeque;
 
+use crate::async_runtime::Charge;
+use crate::errors::Unfunded;
+use crate::proposer::funding;
+use crate::proposer::funding::Funding;
+
 /// Queue of client responders indexed by log index.
 ///
 /// Responders must be pushed in monotonically increasing order.
 /// In debug builds, non-monotonic pushes panic.
+///
+/// On a funded node, room for responders is [`reserve`](Self::reserve)d before they are pushed:
+/// the queue's buffer grown for them, and each one's slot in the vector it is later drained into
+/// to be applied, charged before either is allocated and credited back once it is freed.
 ///
 /// # Performance
 ///
@@ -18,21 +27,50 @@ use std::collections::VecDeque;
 pub(crate) struct ClientResponderQueue<T> {
     /// Responders stored as (log_index, responder) pairs in sorted order
     responders: VecDeque<(u64, T)>,
+
+    /// What the buffer of `responders` is charged, declared after it so that it is credited back
+    /// only once the buffer is freed.
+    buffer: Option<Charge>,
+
+    /// The slots of the queued responders in the vectors they are drained into, charged when
+    /// they were reserved and split off with them by [`drain_upto`](Self::drain_upto).
+    slots: Option<Charge>,
 }
 
 impl<T> ClientResponderQueue<T> {
+    /// What one responder takes, in the queue's buffer and in the vector it is drained into.
+    const SLOT: usize = size_of::<(u64, T)>();
+
     /// Creates a new empty responder queue.
     pub(crate) fn new() -> Self {
         Self {
             responders: VecDeque::new(),
+            buffer: None,
+            slots: None,
         }
     }
 
-    /// Creates a new empty responder queue with the specified capacity.
-    pub(crate) fn with_capacity(capacity: usize) -> Self {
-        Self {
-            responders: VecDeque::with_capacity(capacity),
+    /// Room for `count` more responders, charged to `funding` before any of it is allocated:
+    /// the queue's buffer grown to hold them, at least doubled, and their slots in the vector
+    /// they are drained into. Refused, nothing is charged and nothing allocated.
+    pub(crate) fn reserve(&mut self, count: usize, funding: &Funding) -> Result<(), Unfunded> {
+        if count == 0 {
+            return Ok(());
         }
+        let len = self.responders.len();
+        let need = len + count;
+        let capacity = self.responders.capacity();
+        let grown = if need > capacity { need.max(2 * capacity) } else { 0 };
+
+        let slots = funding.charge(count * Self::SLOT)?;
+        if grown > 0 {
+            let buffer = funding.charge(grown * Self::SLOT)?;
+            // The old buffer stays charged until the grown one replaced it and it was freed.
+            self.responders.reserve_exact(grown - len);
+            self.buffer = buffer;
+        }
+        funding::merge(&mut self.slots, slots);
+        Ok(())
     }
 
     /// Pushes a responder to the end of the queue.
@@ -70,9 +108,24 @@ impl<T> ClientResponderQueue<T> {
     ///
     /// Returns matching responders and removes them from the queue.
     /// Not all indices in the range may have responders.
-    pub(crate) fn drain_upto(&mut self, last_index: u64) -> Vec<(u64, T)> {
+    ///
+    /// The vector is exactly as long as the responders drained, and comes with the charge
+    /// [`reserve`](Self::reserve) took for their slots: its holder drops it only once the vector
+    /// is freed.
+    pub(crate) fn drain_upto(&mut self, last_index: u64) -> (Vec<(u64, T)>, Option<Charge>) {
         let end_pos = self.responders.partition_point(|(index, _)| *index <= last_index);
-        self.responders.drain(0..end_pos).collect()
+        let charge = self.split_slots(end_pos);
+        let mut drained = Vec::with_capacity(end_pos);
+        drained.extend(self.responders.drain(0..end_pos));
+        (drained, charge)
+    }
+
+    /// The charge for `count` queued responders' slots, split off what is held for all of them.
+    fn split_slots(&mut self, count: usize) -> Option<Charge> {
+        let bytes = count * Self::SLOT;
+        let slots = self.slots.as_mut()?;
+        // Responders pushed without a reservation have no charged slot.
+        slots.split(bytes.min(slots.bytes()))
     }
 
     /// Drains all responders from the specified index onwards.
@@ -83,6 +136,8 @@ impl<T> ClientResponderQueue<T> {
         let start_pos =
             self.responders.binary_search_by_key(&from_index, |(index, _)| *index).unwrap_or_else(|pos| pos);
 
+        // Drained here and never into a vector: their slots' charge funds nothing and returns.
+        drop(self.split_slots(self.responders.len() - start_pos));
         self.responders.drain(start_pos..)
     }
 
@@ -114,6 +169,7 @@ impl<T> Default for ClientResponderQueue<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::proposer::funding::testing::Limit;
 
     type TestQueue = ClientResponderQueue<u64>;
 
@@ -133,18 +189,18 @@ mod tests {
 
         assert_eq!(queue.len(), 3);
         assert_eq!(queue.first_index(), Some(10));
-        assert_eq!(queue.drain_upto(30), vec![(10, 100), (20, 200), (30, 300)]);
+        assert_eq!(queue.drain_upto(30).0, vec![(10, 100), (20, 200), (30, 300)]);
     }
 
     #[test]
     fn test_extend() {
         let mut queue = TestQueue::new();
         queue.extend(vec![(10, 100), (20, 200), (30, 300)]);
-        assert_eq!(queue.drain_upto(30), vec![(10, 100), (20, 200), (30, 300)]);
+        assert_eq!(queue.drain_upto(30).0, vec![(10, 100), (20, 200), (30, 300)]);
 
         queue.push(40, 400);
         queue.extend(vec![(50, 500), (60, 600)]);
-        assert_eq!(queue.drain_upto(60), vec![(40, 400), (50, 500), (60, 600)]);
+        assert_eq!(queue.drain_upto(60).0, vec![(40, 400), (50, 500), (60, 600)]);
     }
 
     #[test]
@@ -156,20 +212,20 @@ mod tests {
         queue.push(40, 400);
 
         // Partial drain
-        assert_eq!(queue.drain_upto(25), vec![(10, 100), (20, 200)]);
+        assert_eq!(queue.drain_upto(25).0, vec![(10, 100), (20, 200)]);
         assert_eq!(queue.first_index(), Some(30));
 
         // Drain with gaps
         queue.push(60, 600);
-        assert_eq!(queue.drain_upto(50), vec![(30, 300), (40, 400)]);
+        assert_eq!(queue.drain_upto(50).0, vec![(30, 300), (40, 400)]);
         assert_eq!(queue.first_index(), Some(60));
 
         // Drain all
-        assert_eq!(queue.drain_upto(100), vec![(60, 600)]);
+        assert_eq!(queue.drain_upto(100).0, vec![(60, 600)]);
         assert!(queue.is_empty());
 
         // Drain empty
-        assert_eq!(queue.drain_upto(100), vec![]);
+        assert_eq!(queue.drain_upto(100).0, vec![]);
     }
 
     #[test]
@@ -197,9 +253,61 @@ mod tests {
             queue.push(i * 10, i * 10);
         }
 
-        assert_eq!(queue.drain_upto(4990).len(), 500);
-        assert_eq!(queue.drain_upto(9990).len(), 500);
+        assert_eq!(queue.drain_upto(4990).0.len(), 500);
+        assert_eq!(queue.drain_upto(9990).0.len(), 500);
         assert!(queue.is_empty());
+    }
+
+    #[test]
+    fn test_reserve_refused_charges_and_allocates_nothing() {
+        let slot = size_of::<(u64, u64)>();
+        let limit = Limit::new(3 * slot);
+        let mut queue = TestQueue::new();
+
+        // Two responders need 2 slots and a buffer of 2: a slot more than the limit allows.
+        assert_eq!(queue.reserve(2, &limit.funding()), Err(Unfunded));
+        assert_eq!(limit.held(), 0, "refused, nothing is charged");
+        assert_eq!(queue.responders.capacity(), 0, "and nothing is allocated");
+    }
+
+    #[test]
+    fn test_reserve_charges_until_drained_and_freed() {
+        let slot = size_of::<(u64, u64)>();
+        let limit = Limit::new(usize::MAX);
+        let funding = limit.funding();
+        let mut queue = TestQueue::new();
+
+        queue.reserve(3, &funding).unwrap();
+        assert_eq!(queue.responders.capacity(), 3);
+        assert_eq!(limit.held(), 3 * slot + 3 * slot, "its buffer and its drained slots");
+        queue.push(10, 100);
+        queue.push(20, 200);
+        queue.push(30, 300);
+
+        // Grown, at least doubled: the old buffer's charge goes once the new one replaced it.
+        queue.reserve(1, &funding).unwrap();
+        assert_eq!(queue.responders.capacity(), 6);
+        assert_eq!(limit.held(), 6 * slot + 4 * slot);
+        queue.push(40, 400);
+
+        let (drained, charge) = queue.drain_upto(20);
+        assert_eq!(drained, vec![(10, 100), (20, 200)]);
+        assert_eq!(drained.capacity(), 2);
+        assert_eq!(
+            charge.as_ref().map(Charge::bytes),
+            Some(2 * slot),
+            "the drained vector's slots"
+        );
+        drop(drained);
+        drop(charge);
+        assert_eq!(limit.held(), 6 * slot + 2 * slot);
+
+        // Truncated responders are never drained into a vector: their slots return at once.
+        assert_eq!(queue.drain_from(30).count(), 2);
+        assert_eq!(limit.held(), 6 * slot);
+
+        drop(queue);
+        assert_eq!(limit.held(), 0, "the buffer's charge returns once it is freed");
     }
 
     #[test]
