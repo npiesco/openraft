@@ -27,6 +27,7 @@ use crate::entry::RaftEntry;
 use crate::entry::RaftPayload;
 use crate::errors::ForwardToLeader;
 use crate::errors::InitializeError;
+use crate::errors::MembershipRefused;
 use crate::errors::NotAllowed;
 use crate::errors::NotInMembers;
 use crate::errors::RejectAppendEntries;
