@@ -11,6 +11,8 @@ use std::collections::VecDeque;
 use std::fmt;
 use std::future::Future;
 use std::marker::PhantomData;
+use std::mem::ManuallyDrop;
+use std::ops::Deref;
 use std::sync::Arc;
 
 use openraft_macros::since;
@@ -25,6 +27,7 @@ use crate::async_runtime::Charged;
 use crate::async_runtime::Funder;
 use crate::async_runtime::Mpsc;
 use crate::async_runtime::Oneshot;
+use crate::async_runtime::Select2;
 use crate::async_runtime::watch::Watch;
 use crate::engine::TargetProgress;
 use crate::errors::Unfunded;
@@ -227,13 +230,216 @@ where
     }
 }
 
+/// The charge for parts of a node yet to be made, taken from its funder before any of them is;
+/// uncharged on a node without a funder. Each part is made from its share of the charge, which
+/// the part holds until it is freed; dropped, what is left is credited back. `R` is what a part
+/// is refused with, made from [`Unfunded`]; a node made without a funder makes its parts uncharged
+/// and never refuses one.
+pub(crate) struct Prepaid<C, R = Unfunded> {
+    /// The charge, and how a part it holds too few for, or the runtime cannot make, is refused.
+    charge: Option<(Charge, fn(Unfunded) -> R)>,
+    _parts: PhantomData<fn() -> C>,
+}
+
+impl<C, R> Prepaid<C, R> {
+    /// Nothing charged: every part is made uncharged, and none is refused.
+    pub(crate) fn unfunded() -> Self {
+        Self {
+            charge: None,
+            _parts: PhantomData,
+        }
+    }
+
+    /// `charge` for the parts to be made, a part it holds too few for refused as `refuse` makes
+    /// [`Unfunded`]; without a charge, they are made uncharged.
+    pub(crate) fn new(charge: Option<Charge>, refuse: fn(Unfunded) -> R) -> Self {
+        Self {
+            charge: charge.map(|charge| (charge, refuse)),
+            _parts: PhantomData,
+        }
+    }
+}
+
+impl<C, R> Prepaid<C, R>
+where C: RaftTypeConfig
+{
+    /// What is left, to make parts refused as [`Unfunded`].
+    pub(crate) fn rest(self) -> Prepaid<C> {
+        Prepaid::new(self.charge.map(|(charge, _)| charge), std::convert::identity)
+    }
+
+    /// `held` bytes and those of one sleep, as [`sleep_bytes`] tells, for a task that sleeps to
+    /// hold: refused if the runtime cannot fund its timers; just `held`, uncharged.
+    pub(crate) fn sleeping(&self, held: usize) -> Result<usize, R> {
+        match &self.charge {
+            Some((_, refuse)) => {
+                sleep_bytes::<C>().and_then(|sleep| sleep.checked_add(held)).ok_or_else(|| refuse(Unfunded))
+            }
+            None => Ok(held),
+        }
+    }
+
+    /// `bytes` of the charge split off for a part, to be held with that part until it is freed:
+    /// refused if the charge holds fewer; `None` uncharged.
+    pub(crate) fn split(&mut self, bytes: usize) -> Result<Option<Charge>, R> {
+        match &mut self.charge {
+            Some((charge, refuse)) => charge.split(bytes).map(Some).ok_or_else(|| refuse(Unfunded)),
+            None => Ok(None),
+        }
+    }
+
+    /// A oneshot channel, its block funded by its share of the charge, held until both halves are
+    /// dropped and the block is freed: refused, nothing made, if the charge holds too few.
+    pub(crate) fn oneshot<U>(&mut self) -> Result<(OneshotSenderOf<C, U>, OneshotReceiverOf<C, U>), R>
+    where U: OptionalSend {
+        let Some((_, refuse)) = &self.charge else {
+            return Ok(C::oneshot());
+        };
+        let refuse = *refuse;
+        let block = OneshotOf::<C>::block_bytes::<U>().ok_or_else(|| refuse(Unfunded))?;
+        let charge = self.split(block)?.ok_or_else(|| refuse(Unfunded))?;
+        OneshotOf::<C>::charged_channel(charge).map_err(|_| refuse(Unfunded))
+    }
+
+    /// A watch channel starting at `init`, its block funded by its share of the charge, held
+    /// until every handle is dropped and the block is freed: refused, nothing made, if the charge
+    /// holds too few.
+    pub(crate) fn watch<U>(&mut self, init: U) -> Result<(WatchSenderOf<C, U>, WatchReceiverOf<C, U>), R>
+    where U: OptionalSend + OptionalSync {
+        let Some((_, refuse)) = &self.charge else {
+            return Ok(C::watch_channel(init));
+        };
+        let refuse = *refuse;
+        let block = WatchOf::<C>::block_bytes::<U>().ok_or_else(|| refuse(Unfunded))?;
+        let charge = self.split(block)?.ok_or_else(|| refuse(Unfunded))?;
+        WatchOf::<C>::charged_channel(charge, init).map_err(|_| refuse(Unfunded))
+    }
+
+    /// A bounded channel of `buffer` values, everything it allocates in its life made now and
+    /// funded by its share of the charge, held until every handle is dropped and all of it is
+    /// freed: refused, nothing made, if the charge holds too few.
+    pub(crate) fn mpsc<U>(&mut self, buffer: usize) -> Result<(MpscSenderOf<C, U>, MpscReceiverOf<C, U>), R>
+    where U: OptionalSend {
+        let Some((_, refuse)) = &self.charge else {
+            return Ok(C::mpsc(buffer));
+        };
+        let refuse = *refuse;
+        let block = MpscOf::<C>::block_bytes::<U>(buffer).ok_or_else(|| refuse(Unfunded))?;
+        let charge = self.split(block)?.ok_or_else(|| refuse(Unfunded))?;
+        MpscOf::<C>::charged_channel(charge, buffer).map_err(|_| refuse(Unfunded))
+    }
+
+    /// `value` in a block its handles share, the block funded by its share of the charge, held
+    /// until the last handle frees the block and `value`: refused, `value` dropped and nothing
+    /// made, if the charge holds too few.
+    pub(crate) fn shared<T>(&mut self, value: T) -> Result<Shared<T>, R> {
+        let charge = self.split(Shared::<T>::block_bytes())?;
+        Ok(Shared::new(value, charge))
+    }
+
+    /// Spawns `future`, everything the runtime allocates for the task funded by its share of the
+    /// charge and held until that is freed, and `held` bytes more held by the task's future,
+    /// after `future`, to fund what `future` holds until that is freed: refused, `future` dropped
+    /// before any of its share goes back and nothing allocated, if the charge holds too few or
+    /// the runtime cannot make the task.
+    pub(crate) fn spawn<T>(&mut self, future: T, held: usize) -> Result<JoinHandleOf<C, T::Output>, R>
+    where
+        T: Future + OptionalSend + 'static,
+        T::Output: OptionalSend + 'static,
+    {
+        self.spawn_with(held, || future)
+    }
+
+    /// [`Self::spawn`] of the future `make` makes, made only once both shares are split off, so
+    /// what it allocates for its `held` bytes is funded before it is: refused, nothing made, if
+    /// the charge holds too few.
+    pub(crate) fn spawn_with<T>(
+        &mut self,
+        held: usize,
+        make: impl FnOnce() -> T,
+    ) -> Result<JoinHandleOf<C, T::Output>, R>
+    where
+        T: Future + OptionalSend + 'static,
+        T::Output: OptionalSend + 'static,
+    {
+        let Some((charge, refuse)) = &mut self.charge else {
+            return Ok(C::spawn(make()));
+        };
+        let refuse = *refuse;
+        let Some(task) = spawned_bytes::<C, T>().and_then(|bytes| charge.split(bytes)) else {
+            return Err(refuse(Unfunded));
+        };
+        let Some(held) = charge.split(held) else {
+            drop(make);
+            drop(task);
+            return Err(refuse(Unfunded));
+        };
+        AsyncRuntimeOf::<C>::spawn_charged(task, Charged::new(make(), held)).map_err(|_| refuse(Unfunded))
+    }
+}
+
+/// A value in a block shared by its handles, as an `Arc` is, the block charged before it was made:
+/// the last handle frees the block, then the value, and only then credits the charge back.
+pub(crate) struct Shared<T> {
+    block: ManuallyDrop<Arc<Funded<T>>>,
+}
+
+/// The block a [`Shared`] value's handles share.
+struct Funded<T> {
+    value: T,
+    charge: Option<Charge>,
+}
+
+impl<T> Shared<T> {
+    /// What the block a [`Shared`] `T` is made in allocates.
+    pub(crate) const fn block_bytes() -> usize {
+        arc_block_bytes::<Funded<T>>()
+    }
+
+    /// `value` moved into a block of [`Self::block_bytes`] funded by `charge`, uncharged without
+    /// one.
+    pub(crate) fn new(value: T, charge: Option<Charge>) -> Self {
+        Self {
+            block: ManuallyDrop::new(Arc::new(Funded { value, charge })),
+        }
+    }
+}
+
+impl<T> Clone for Shared<T> {
+    fn clone(&self) -> Self {
+        Self {
+            block: ManuallyDrop::new(Arc::clone(&self.block)),
+        }
+    }
+}
+
+impl<T> Deref for Shared<T> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        &self.block.value
+    }
+}
+
+impl<T> Drop for Shared<T> {
+    /// The last handle frees the block, then the value, and only then credits the charge back.
+    fn drop(&mut self) {
+        // SAFETY: `block` is taken once, here, and the handle is never used again.
+        let block = unsafe { ManuallyDrop::take(&mut self.block) };
+        if let Some(Funded { value, charge }) = Arc::into_inner(block) {
+            drop(value);
+            drop(charge);
+        }
+    }
+}
+
 /// A task running `T` yet to be spawned, and what it holds, charged to a node's funder before any
 /// of it is made; uncharged on a node run unfunded. Each part is made from its share of the
 /// charge, which is held by the part until it is freed; dropped, what it still holds is credited
 /// back.
 pub(crate) struct TaskCharge<C, T> {
-    charge: Option<Charge>,
-    _task: PhantomData<fn() -> (C, T)>,
+    parts: Prepaid<C>,
+    _task: PhantomData<fn() -> T>,
 }
 
 impl<C, T> TaskCharge<C, T>
@@ -264,7 +470,7 @@ where
             None => None,
         };
         Ok(Self {
-            charge,
+            parts: Prepaid::new(charge, std::convert::identity),
             _task: PhantomData,
         })
     }
@@ -272,49 +478,25 @@ where
     /// `bytes` of the charge split off for a part the task holds, to be held with that part
     /// until it is freed: refused as [`Unfunded`] if the charge holds fewer; `None` unfunded.
     pub(crate) fn split(&mut self, bytes: usize) -> Result<Option<Charge>, Unfunded> {
-        match &mut self.charge {
-            Some(charge) => charge.split(bytes).map(Some).ok_or(Unfunded),
-            None => Ok(None),
-        }
+        self.parts.split(bytes)
     }
 
-    /// A oneshot channel the task holds, its block funded by its share of the charge, held until
-    /// both halves are dropped and the block is freed: refused as [`Unfunded`], nothing made, if
-    /// the charge holds too few.
+    /// A oneshot channel the task holds, as [`Prepaid::oneshot`] makes it.
     pub(crate) fn oneshot<U>(&mut self) -> Result<(OneshotSenderOf<C, U>, OneshotReceiverOf<C, U>), Unfunded>
     where U: OptionalSend {
-        if self.charge.is_none() {
-            return Ok(C::oneshot());
-        }
-        let block = OneshotOf::<C>::block_bytes::<U>().ok_or(Unfunded)?;
-        let charge = self.split(block)?.ok_or(Unfunded)?;
-        OneshotOf::<C>::charged_channel(charge).map_err(|_| Unfunded)
+        self.parts.oneshot()
     }
 
-    /// A watch channel the task holds, starting at `init`, its block funded by its share of the
-    /// charge, held until every handle is dropped and the block is freed: refused as
-    /// [`Unfunded`], nothing made, if the charge holds too few.
+    /// A watch channel the task holds, as [`Prepaid::watch`] makes it.
     pub(crate) fn watch<U>(&mut self, init: U) -> Result<(WatchSenderOf<C, U>, WatchReceiverOf<C, U>), Unfunded>
     where U: OptionalSend + OptionalSync {
-        if self.charge.is_none() {
-            return Ok(C::watch_channel(init));
-        }
-        let block = WatchOf::<C>::block_bytes::<U>().ok_or(Unfunded)?;
-        let charge = self.split(block)?.ok_or(Unfunded)?;
-        WatchOf::<C>::charged_channel(charge, init).map_err(|_| Unfunded)
+        self.parts.watch(init)
     }
 
-    /// A bounded channel of `buffer` values the task holds, everything it allocates in its life
-    /// made now and funded by its share of the charge, held until every handle is dropped and all
-    /// of it is freed: refused as [`Unfunded`], nothing made, if the charge holds too few.
+    /// A bounded channel the task holds, as [`Prepaid::mpsc`] makes it.
     pub(crate) fn mpsc<U>(&mut self, buffer: usize) -> Result<(MpscSenderOf<C, U>, MpscReceiverOf<C, U>), Unfunded>
     where U: OptionalSend {
-        if self.charge.is_none() {
-            return Ok(C::mpsc(buffer));
-        }
-        let block = MpscOf::<C>::block_bytes::<U>(buffer).ok_or(Unfunded)?;
-        let charge = self.split(block)?.ok_or(Unfunded)?;
-        MpscOf::<C>::charged_channel(charge, buffer).map_err(|_| Unfunded)
+        self.parts.mpsc(buffer)
     }
 
     /// Spawns `future`, everything the runtime allocates for the task funded by its share of the
@@ -322,15 +504,18 @@ where
     /// `future`, to fund what `future` holds until that is freed: refused as [`Unfunded`],
     /// `future` dropped before any of the charge goes back and nothing allocated, if what is left
     /// holds too few.
-    pub(crate) fn spawn(self, future: T) -> Result<JoinHandleOf<C, T::Output>, Unfunded> {
-        let Some(mut held) = self.charge else {
-            return Ok(C::spawn(future));
+    pub(crate) fn spawn(mut self, future: T) -> Result<JoinHandleOf<C, T::Output>, Unfunded> {
+        let held = match &self.parts.charge {
+            Some((charge, _)) => {
+                let Some(task) = spawned_bytes::<C, T>() else {
+                    drop(future);
+                    return Err(Unfunded);
+                };
+                charge.bytes().saturating_sub(task)
+            }
+            None => 0,
         };
-        let Some(task) = spawned_bytes::<C, T>().and_then(|bytes| held.split(bytes)) else {
-            drop(future);
-            return Err(Unfunded);
-        };
-        AsyncRuntimeOf::<C>::spawn_charged(task, Charged::new(future, held)).map_err(|_| Unfunded)
+        self.parts.spawn(future, held)
     }
 }
 
@@ -364,6 +549,37 @@ where
     T::Output: OptionalSend + 'static,
 {
     AsyncRuntimeOf::<C>::spawn_bytes::<Charged<T>>()
+}
+
+/// What one sleep a funded task makes allocates until it is dropped, its timer's registration
+/// included, as [`AsyncRuntime::sleep_bytes`] tells: held by a task that sleeps, which makes one
+/// sleep at a time, or by one that runs [`within`]. `None` if the runtime cannot fund its timers.
+pub(crate) fn sleep_bytes<C: RaftTypeConfig>() -> Option<usize> {
+    AsyncRuntimeOf::<C>::sleep_bytes()
+}
+
+/// The deadline passed before the future [`within`] raced it against completed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Elapsed;
+
+impl fmt::Display for Elapsed {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("deadline elapsed")
+    }
+}
+
+/// The output of `future`, or [`Elapsed`] if `deadline` passes first: a timeout that allocates
+/// one sleep, which [`sleep_bytes`] charges, whatever `future` is, where the runtime's own timeout
+/// may box `future`. `future` is polled first, as the runtime's timeout polls it.
+pub(crate) async fn within<C, F>(deadline: InstantOf<C>, future: F) -> Result<F::Output, Elapsed>
+where
+    C: RaftTypeConfig,
+    F: Future + OptionalSend,
+{
+    match C::select2(future, C::sleep_until(deadline)).await {
+        Select2::First(output) => Ok(output),
+        Select2::Second(()) => Err(Elapsed),
+    }
 }
 
 /// The bytes an `Arc<T>` allocates for its block: its strong and weak counts, then the value,
@@ -405,19 +621,12 @@ pub(crate) const fn tree_bytes<K, V>(len: usize) -> usize {
     2 * (len / 5 + 1) * tree_node_bytes::<K, V>()
 }
 
-/// One node of a B-tree map of `K` and `V`, charged as an internal node, the larger: a parent
-/// link, its index and length, eleven keys and eleven values each padded to its alignment, and
-/// twelve child links, padded to the largest alignment. A map of one entry or more holds no more
+/// One node of a B-tree map of `K` and `V`, charged as an internal node, the larger, as
+/// [`openraft_rt::funding::tree_node_bytes`] tells. A map of one entry or more holds no more
 /// nodes than entries, as every node holds at least one; an emptied map keeps its root until it
 /// is replaced.
 pub(crate) const fn tree_node_bytes<K, V>() -> usize {
-    let link = size_of::<usize>();
-    link + 2 * size_of::<u16>()
-        + 11 * (size_of::<K>() + size_of::<V>())
-        + align_of::<K>()
-        + align_of::<V>()
-        + 12 * link
-        + larger(link, larger(align_of::<K>(), align_of::<V>()))
+    openraft_rt::funding::tree_node_bytes::<K, V>()
 }
 
 /// What collecting at most `len` items into a `BTreeSet<T>` allocates: std collects them into a

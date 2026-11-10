@@ -10,9 +10,17 @@ mod display_mode;
 #[allow(clippy::module_inception)]
 mod runtime_stats;
 mod runtime_stats_display;
+#[cfg(not(feature = "runtime-stats"))]
+mod unrecorded;
 
 pub mod log_stage;
 
 pub use self::display_mode::DisplayMode;
 pub use self::runtime_stats::RuntimeStats;
+// What the core records its statistics into: nothing, allocating nothing, unless the
+// `runtime-stats` feature can read them.
+#[cfg(feature = "runtime-stats")]
+pub(crate) use self::runtime_stats::RuntimeStats as Recorder;
 pub use self::runtime_stats_display::RuntimeStatsDisplay;
+#[cfg(not(feature = "runtime-stats"))]
+pub(crate) use self::unrecorded::Unrecorded as Recorder;

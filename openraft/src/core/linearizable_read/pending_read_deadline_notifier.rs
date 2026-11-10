@@ -1,12 +1,21 @@
+use std::future::Future;
+
 use crate::RaftTypeConfig;
 use crate::async_runtime::MpscSender;
+use crate::async_runtime::watch::Watch;
 use crate::async_runtime::watch::WatchReceiver;
 use crate::async_runtime::watch::WatchSender;
 use crate::core::notification::Notification;
+use crate::errors::Unfunded;
+use crate::proposer::funding::Prepaid;
+use crate::proposer::funding::sleep_bytes;
+use crate::proposer::funding::task_bytes;
+use crate::proposer::funding::within;
 use crate::type_config::TypeConfigExt;
 use crate::type_config::alias::InstantOf;
 use crate::type_config::alias::JoinHandleOf;
 use crate::type_config::alias::MpscSenderOf;
+use crate::type_config::alias::WatchOf;
 use crate::type_config::alias::WatchReceiverOf;
 use crate::type_config::alias::WatchSenderOf;
 
@@ -28,14 +37,39 @@ where C: RaftTypeConfig
 impl<C> PendingReadDeadlineNotifier<C>
 where C: RaftTypeConfig
 {
-    pub(crate) fn spawn(notification_tx: MpscSenderOf<C, Notification<C>>) -> Self {
-        let (deadline_tx, deadline_rx) = C::watch_channel(None);
-        let join_handle = C::spawn(Self::run(deadline_rx, notification_tx));
+    /// Spawn the notifier, its channel and task each made from its share of `prepaid`: refused,
+    /// nothing spawned, if `prepaid` holds too few.
+    pub(crate) fn spawn(
+        notification_tx: MpscSenderOf<C, Notification<C>>,
+        prepaid: &mut Prepaid<C>,
+    ) -> Result<Self, Unfunded> {
+        let (deadline_tx, deadline_rx) = prepaid.watch(None)?;
+        // It waits for each deadline on one sleep at a time, held with the task.
+        let held = prepaid.sleeping(0)?;
+        let join_handle = prepaid.spawn(Self::task((deadline_rx, notification_tx)), held)?;
 
-        Self {
+        Ok(Self {
             deadline_tx,
             _join_handle: join_handle,
-        }
+        })
+    }
+
+    /// What the notifier's channel, task and the sleep it holds allocate: `None` if the runtime
+    /// cannot fund them.
+    pub(crate) fn spawn_bytes() -> Option<usize> {
+        WatchOf::<C>::block_bytes::<Option<InstantOf<C>>>()?
+            .checked_add(task_bytes::<C, _, _>(Self::task)?)?
+            .checked_add(sleep_bytes::<C>()?)
+    }
+
+    /// The notifier's task.
+    fn task(
+        (deadline_rx, notification_tx): (
+            WatchReceiverOf<C, Option<InstantOf<C>>>,
+            MpscSenderOf<C, Notification<C>>,
+        ),
+    ) -> impl Future<Output = ()> {
+        Self::run(deadline_rx, notification_tx)
     }
 
     pub(crate) fn set_deadline(&self, deadline: Option<InstantOf<C>>) {
@@ -55,7 +89,7 @@ where C: RaftTypeConfig
                 continue;
             };
 
-            let wait_result = C::timeout_at(deadline, deadline_rx.changed()).await;
+            let wait_result = within::<C, _>(deadline, deadline_rx.changed()).await;
             match wait_result {
                 Ok(Ok(())) => continue,
                 Ok(Err(_)) => return,
@@ -88,7 +122,7 @@ mod tests {
     fn deadline_notifier_uses_latest_deadline_and_rearms() {
         C::run(async {
             let (tx, mut rx) = C::mpsc(4);
-            let notifier = PendingReadDeadlineNotifier::<C>::spawn(tx);
+            let notifier = PendingReadDeadlineNotifier::<C>::spawn(tx, &mut Prepaid::unfunded()).unwrap();
 
             let late = C::now() + Duration::from_secs(1);
             notifier.set_deadline(Some(late));

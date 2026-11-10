@@ -5,7 +5,6 @@ use std::sync::atomic::AtomicBool;
 
 use crate::Config;
 use crate::RaftTypeConfig;
-use crate::type_config::TypeConfigExt;
 use crate::type_config::alias::WatchSenderOf;
 
 /// Updatable config for a raft runtime.
@@ -22,11 +21,11 @@ where C: RaftTypeConfig
 impl<C> RuntimeConfig<C>
 where C: RaftTypeConfig
 {
-    pub(crate) fn new(config: &Config) -> Self {
-        let (enable_tick, _rx) = C::watch_channel(config.enable_tick);
-        let enable_tick = Mutex::new(enable_tick);
+    /// The runtime config `config` starts with, the tick enabled through `enable_tick`: a channel
+    /// the caller made, starting at `config.enable_tick`.
+    pub(crate) fn new(config: &Config, enable_tick: WatchSenderOf<C, bool>) -> Self {
         Self {
-            enable_tick,
+            enable_tick: Mutex::new(enable_tick),
             enable_heartbeat: AtomicBool::from(config.enable_heartbeat),
             enable_elect: AtomicBool::from(config.enable_elect),
             enable_pre_vote: AtomicBool::from(config.get_enable_pre_vote()),

@@ -13,6 +13,7 @@ use crate::errors::EmptyMembership;
 use crate::errors::MembershipError;
 use crate::errors::NodeNotFound;
 use crate::errors::Operation;
+use crate::metered::metered;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord)]
 #[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
@@ -88,6 +89,30 @@ fn test_membership() -> anyhow::Result<()> {
     assert!(m123_345.get_joint_config().len() > 1);
 
     Ok(())
+}
+
+/// The voters, with their nodes, are what `voter_ids()` yields, learners not among them, read
+/// in place: unlike `voter_ids()`, which collects the ids of every config, they allocate nothing.
+#[test]
+fn test_membership_voters_are_read_in_place() {
+    let m = Membership::<u64, ()>::new_with_defaults(vec![btreeset! {1,2,3}, btreeset! {3,4,5}], btreeset! {6});
+
+    let (voters, meter) = metered(|| {
+        let mut ids = [0u64; 8];
+        let mut n = 0;
+        for (id, _node) in m.voters() {
+            ids[n] = *id;
+            n += 1;
+        }
+        (ids, n)
+    });
+
+    assert_eq!(([1, 2, 3, 4, 5, 0, 0, 0], 5), voters);
+    assert_eq!(0, meter.allocated, "the voters are read in place");
+    assert_eq!(
+        m.voter_ids().collect::<Vec<_>>(),
+        m.voters().map(|(id, _)| *id).collect::<Vec<_>>()
+    );
 }
 
 #[test]

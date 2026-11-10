@@ -54,6 +54,7 @@ use crate::network::NetStreamAppend;
 use crate::network::RPCOption;
 use crate::progress::inflight_id::InflightId;
 use crate::proposer::funding::arc_block_bytes;
+use crate::proposer::funding::sleep_bytes;
 use crate::proposer::funding::spawned_bytes;
 use crate::proposer::funding::unfold_bytes;
 use crate::raft::AppendEntriesRequest;
@@ -114,7 +115,8 @@ where
 /// it streams and of its backoff, and what one stream of requests at a time allocates: the queue
 /// of requests in flight and the slot of a fatal error its task makes once, and the box of the
 /// request stream and what [`NetStreamAppend::stream_append_bytes`] allocates for it, freed before
-/// the next stream is made. All of it is freed with its task.
+/// the next stream is made; and the one sleep at a time a request waits on, for the backoff or
+/// for logs to read, made under the lock of the stream's state. All of it is freed with its task.
 pub(crate) fn stream_parts_bytes<C, NF, LS>() -> Option<usize>
 where
     C: RaftTypeConfig,

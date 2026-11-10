@@ -1,6 +1,9 @@
+#[cfg(feature = "runtime-stats")]
 use std::sync::Arc;
+#[cfg(feature = "runtime-stats")]
 use std::sync::Mutex;
 
+#[cfg(feature = "runtime-stats")]
 use base2histogram::Histogram;
 
 /// A shared histogram for tracking replication batch sizes.
@@ -8,8 +11,12 @@ use base2histogram::Histogram;
 /// This is shared between `RaftCore` and replication tasks.
 /// Only `replicate_batch` needs to be shared across tasks;
 /// other runtime stats are owned directly by `RaftCore`.
+///
+/// Without the `runtime-stats` feature nothing can read it, so it holds nothing, allocates
+/// nothing and records nothing.
 #[derive(Debug, Clone)]
 pub struct SharedReplicateBatch {
+    #[cfg(feature = "runtime-stats")]
     inner: Arc<Mutex<Histogram>>,
 }
 
@@ -22,14 +29,18 @@ impl Default for SharedReplicateBatch {
 impl SharedReplicateBatch {
     pub(crate) fn new() -> Self {
         Self {
+            #[cfg(feature = "runtime-stats")]
             inner: Arc::new(Mutex::new(Histogram::<()>::new())),
         }
     }
 
     /// Record a replication batch size.
     pub fn record(&self, value: u64) {
-        let mut guard = self.inner.lock().unwrap();
-        guard.record(value);
+        #[cfg(feature = "runtime-stats")]
+        self.inner.lock().unwrap().record(value);
+
+        #[cfg(not(feature = "runtime-stats"))]
+        let _ = value;
     }
 
     /// Get a clone of the histogram for reporting.

@@ -104,6 +104,18 @@ pub trait AsyncRuntime: Debug + 'static {
         Err(future)
     }
 
+    /// The bytes one [`Sleep`](Self::Sleep), made by [`sleep`](Self::sleep) or
+    /// [`sleep_until`](Self::sleep_until), allocates from when it is made until it is dropped,
+    /// the registration of its timer included: a funded task that sleeps is charged them before
+    /// it makes the sleep, and holds them until the sleep is dropped.
+    ///
+    /// `None` if the runtime cannot fund its timers, which by default it cannot: a funded task
+    /// that sleeps is then refused before anything is made for it.
+    #[since(version = "0.10.0")]
+    fn sleep_bytes() -> Option<usize> {
+        None
+    }
+
     /// Wait until `duration` has elapsed.
     #[track_caller]
     fn sleep(duration: Duration) -> Self::Sleep;
@@ -306,9 +318,13 @@ pub trait AsyncRuntime: Debug + 'static {
     /// Try to poll a value from the channel within the given deadline.
     ///
     /// By default, this first checks synchronously if a value is already available.
-    /// If not, it uses the AsyncRuntime timeout mechanism to wait until:
+    /// If not, it waits on one [`sleep_until`](Self::sleep_until) the deadline, raced against
+    /// the receive, until:
     /// - a new element arrives
     /// - the deadline is reached
+    ///
+    /// It allocates only that sleep, as [`sleep_bytes`](Self::sleep_bytes) tells, never boxing
+    /// the receive as a runtime's [`timeout_at`](Self::timeout_at) may.
     #[since(version = "0.10.0")]
     fn mpsc_recv_deadline<T: OptionalSend>(
         receiver: &mut <Self::Mpsc as Mpsc>::Receiver<T>,
@@ -319,10 +335,10 @@ pub trait AsyncRuntime: Debug + 'static {
                 Ok(value) => Ok(value),
                 Err(TryRecvError::Disconnected) => Err(TryRecvError::Disconnected),
                 Err(TryRecvError::Empty) if <Self::Instant as Instant>::now() >= deadline => Err(TryRecvError::Empty),
-                Err(TryRecvError::Empty) => match Self::timeout_at(deadline, receiver.recv()).await {
-                    Ok(None) => Err(TryRecvError::Disconnected),
-                    Ok(Some(value)) => Ok(value),
-                    Err(_) => Err(TryRecvError::Empty),
+                Err(TryRecvError::Empty) => match Self::select2(receiver.recv(), Self::sleep_until(deadline)).await {
+                    Select2::First(None) => Err(TryRecvError::Disconnected),
+                    Select2::First(Some(value)) => Ok(value),
+                    Select2::Second(()) => Err(TryRecvError::Empty),
                 },
             }
         }

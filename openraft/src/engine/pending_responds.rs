@@ -212,9 +212,9 @@ mod tests {
         snapshot: Option<TestLogId>,
     ) -> IOState<UTConfig> {
         let vote = Vote::new(1, 1);
-        let mut io_state = IOState::new("xx", &vote, applied, snapshot, None);
+        let mut io_state = IOState::new(&vote, applied, snapshot, None);
         if let Some(id) = log_io {
-            io_state.log_progress = Valid::new(IOProgress::new_synchronized(Some(id), "xx", "log"));
+            io_state.log_progress = Valid::new(IOProgress::new_synchronized(Some(id), "log"));
         }
         io_state
     }

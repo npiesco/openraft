@@ -1,9 +1,12 @@
 //! Step-down watcher: a task that steps down a Leader that is removed from a committed
 //! membership config.
 
+use std::future::Future;
 use std::time::Duration;
 
 use tracing::Instrument;
+use tracing::Span;
+use tracing::instrument::Instrumented;
 
 use crate::Config;
 use crate::RaftTypeConfig;
@@ -14,8 +17,12 @@ use crate::async_runtime::watch::WatchReceiver;
 use crate::core::ServerState;
 use crate::core::raft_msg::RaftMsg;
 use crate::core::raft_msg::external_command::ExternalCommand;
+use crate::errors::Unfunded;
 use crate::metrics::RaftMetrics;
 use crate::metrics::RaftServerMetrics;
+use crate::proposer::funding::Prepaid;
+use crate::proposer::funding::sleep_bytes;
+use crate::proposer::funding::task_bytes;
 use crate::type_config::TypeConfigExt;
 use crate::type_config::alias::MpscWeakSenderOf;
 use crate::type_config::alias::WatchReceiverOf;
@@ -60,7 +67,8 @@ where C: RaftTypeConfig
 impl<C> StepDownWatcher<C>
 where C: RaftTypeConfig
 {
-    /// Spawn the watcher task.
+    /// Spawn the watcher task, made from its share of `prepaid`: refused, nothing spawned, if
+    /// `prepaid` holds too few.
     ///
     /// It does nothing if the automated step down is disabled,
     /// i.e., [`removed_leader_step_down`] is [`StepDownPolicy::Never`].
@@ -71,9 +79,10 @@ where C: RaftTypeConfig
         rx_metrics: WatchReceiverOf<C, RaftMetrics<C>>,
         tx_api: MpscWeakSenderOf<C, RaftMsg<C>>,
         config: &Config,
-    ) {
+        prepaid: &mut Prepaid<C>,
+    ) -> Result<(), Unfunded> {
         let delay = match config.removed_leader_step_down {
-            StepDownPolicy::Never => return,
+            StepDownPolicy::Never => return Ok(()),
             StepDownPolicy::After(ms) => ms,
         };
 
@@ -85,9 +94,24 @@ where C: RaftTypeConfig
             transfer_wait: Duration::from_millis(config.heartbeat_interval),
         };
 
-        let span = tracing::debug_span!("step_down_watcher");
-        let watch_fut = this.watch_loop().instrument(span);
-        let _join_handle = C::spawn(watch_fut);
+        // It waits out each delay on one sleep at a time, held with the task.
+        let held = prepaid.sleeping(0)?;
+        let _join_handle = prepaid.spawn(Self::task((this, tracing::debug_span!("step_down_watcher"))), held)?;
+        Ok(())
+    }
+
+    /// What the runtime charges the watcher's task and the sleep it holds, if `config` runs one:
+    /// `None` if it cannot fund them.
+    pub(crate) fn spawn_bytes(config: &Config) -> Option<usize> {
+        match config.removed_leader_step_down {
+            StepDownPolicy::Never => Some(0),
+            StepDownPolicy::After(_) => task_bytes::<C, _, _>(Self::task)?.checked_add(sleep_bytes::<C>()?),
+        }
+    }
+
+    /// The watcher's task: its loop, in `span`.
+    fn task((this, span): (Self, Span)) -> Instrumented<impl Future<Output = ()>> {
+        this.watch_loop().instrument(span)
     }
 
     async fn watch_loop(mut self) {
@@ -112,22 +136,36 @@ where C: RaftTypeConfig
     ///   membership config log id observed above, thus it is dropped if a new Leader is already
     ///   established or the membership config has changed.
     async fn try_step_down(&self) {
-        // Clone the metrics out of the watch channel: the borrowed reference is not `Send`,
-        // and holding it across an `await` would block the metrics updater.
-        let server_metrics = self.rx_server_metrics.borrow_watched().clone();
-        if !is_removed_leader(&server_metrics) {
+        // Each check reads the metrics where the watch channel holds them, never a clone, which
+        // would allocate; the borrow, which is not `Send` and would block the metrics updater, is
+        // dropped before each `await`.
+        if !is_removed_leader(&*self.rx_server_metrics.borrow_watched()) {
             return;
         }
 
         C::sleep(self.step_down_delay).await;
 
-        let server_metrics = self.rx_server_metrics.borrow_watched().clone();
-        if !is_removed_leader(&server_metrics) {
-            return;
-        }
+        let (vote, membership_log_id) = {
+            let server_metrics = self.rx_server_metrics.borrow_watched();
+            if !is_removed_leader(&*server_metrics) {
+                return;
+            }
 
-        let metrics = self.rx_metrics.borrow_watched().clone();
-        let target = transfer_target(&metrics);
+            // In the fence a `None` membership log id means skipping the membership check, thus
+            // it must be `Some` here. It always holds: this node is a Leader, hence the cluster
+            // is initialized, hence the membership config comes from a log entry that has a log
+            // id.
+            debug_assert!(
+                server_metrics.membership_config.log_id().is_some(),
+                "the membership config of a Leader must have a log id"
+            );
+            (
+                server_metrics.vote.clone(),
+                server_metrics.membership_config.log_id().clone(),
+            )
+        };
+
+        let target = transfer_target(&*self.rx_metrics.borrow_watched());
 
         if let Some(to) = target {
             tracing::info!("removed Leader steps down: transfer leadership to {}", to);
@@ -136,17 +174,9 @@ where C: RaftTypeConfig
 
         C::sleep(self.transfer_wait).await;
 
-        // In the fence a `None` membership log id means skipping the membership check, thus it
-        // must be `Some` here. It always holds: this node is a Leader, hence the cluster is
-        // initialized, hence the membership config comes from a log entry that has a log id.
-        debug_assert!(
-            server_metrics.membership_config.log_id().is_some(),
-            "the membership config of a Leader must have a log id"
-        );
-
         let cmd = ExternalCommand::RefreshServerState {
-            vote: Some(server_metrics.vote.clone()),
-            membership_log_id: server_metrics.membership_config.log_id().clone(),
+            vote: Some(vote),
+            membership_log_id,
         };
         self.send(cmd).await;
     }
@@ -195,7 +225,7 @@ where C: RaftTypeConfig {
     let membership = metrics.membership_config.membership();
     let matching = |id: &C::NodeId| replication.get(id).cloned().flatten();
 
-    membership.voter_ids().max_by_key(matching)
+    membership.voters().map(|(id, _)| id).max_by_key(|id| matching(id)).cloned()
 }
 
 #[cfg(test)]
@@ -210,6 +240,7 @@ mod tests {
     use crate::core::ServerState;
     use crate::engine::testing::UTConfig;
     use crate::engine::testing::log_id;
+    use crate::metered::metered;
     use crate::metrics::RaftMetrics;
     use crate::metrics::RaftServerMetrics;
     use crate::type_config::alias::StoredMembershipOf;
@@ -294,5 +325,25 @@ mod tests {
         });
 
         assert_eq!(Some(2), transfer_target(&m));
+    }
+
+    /// The watcher's checks read the metrics where they are, allocating nothing: the watcher's
+    /// task is charged only for itself and its sleep, so what it reads must not allocate.
+    #[test]
+    fn test_checks_allocate_nothing() {
+        let server = server_metrics(Membership::new_with_defaults(vec![btreeset! {2,3}, btreeset! {3,4}], []));
+        let mut m = RaftMetrics::<UTConfig>::new_initial(1);
+        m.membership_config = server.membership_config.clone();
+        m.replication = Some(btreemap! {
+            2u64 => Some(log_id(2, 1, 2)),
+            3u64 => Some(log_id(2, 1, 3)),
+            4u64 => Some(log_id(2, 1, 4)),
+        });
+
+        let ((removed, target), meter) = metered(|| (is_removed_leader(&server), transfer_target(&m)));
+
+        assert!(removed);
+        assert_eq!(Some(4), target, "a voter of either joint config is a target");
+        assert_eq!(0, meter.allocated, "the checks allocate nothing");
     }
 }

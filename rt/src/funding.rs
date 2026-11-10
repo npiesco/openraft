@@ -123,6 +123,27 @@ impl<F: Future> Future for Charged<F> {
     }
 }
 
+const fn larger(a: usize, b: usize) -> usize {
+    if a > b { a } else { b }
+}
+
+/// The bytes one node of a `BTreeMap<K, V>` takes, charged as an internal node, the larger kind:
+/// a parent link, its index and length, eleven keys and eleven values each padded to its
+/// alignment, and twelve child links, padded to the largest alignment.
+///
+/// A map holds no more nodes than entries, as every node but an emptied root holds one at least:
+/// a map each of whose entries is charged one node is funded, but for the emptied root it keeps
+/// until it is dropped.
+pub const fn tree_node_bytes<K, V>() -> usize {
+    let link = size_of::<usize>();
+    link + 2 * size_of::<u16>()
+        + 11 * (size_of::<K>() + size_of::<V>())
+        + align_of::<K>()
+        + align_of::<V>()
+        + 12 * link
+        + larger(link, larger(align_of::<K>(), align_of::<V>()))
+}
+
 #[cfg(test)]
 mod tests {
     use std::future::Future;

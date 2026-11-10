@@ -36,8 +36,12 @@ use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::time::Duration;
 
+use core_state::CoreJoinHandle;
 use core_state::CoreState;
+use core_state::JoinWatch;
+use core_state::StartCore;
 use core_state::StopChannels;
+use core_state::Unstarted;
 use derive_more::Display;
 use futures_util::FutureExt;
 use linearizable_read::Linearizer;
@@ -69,6 +73,8 @@ use openraft_macros::since;
 pub use stream_append::StreamAppendResult;
 use tracing::Instrument;
 use tracing::Level;
+use tracing::Span;
+use tracing::instrument::Instrumented;
 use tracing::trace_span;
 
 pub use self::leader::Leader;
@@ -82,11 +88,13 @@ use crate::StorageError;
 use crate::StorageHelper;
 use crate::async_runtime::Charge;
 use crate::async_runtime::Funder;
+use crate::async_runtime::Mpsc;
 use crate::async_runtime::MpscWeakSender;
 use crate::async_runtime::OneshotSender;
 use crate::async_runtime::Select2;
 use crate::async_runtime::mpsc::MpscReceiver;
 use crate::async_runtime::mpsc::MpscSender;
+use crate::async_runtime::watch::Watch;
 use crate::async_runtime::watch::WatchReceiver;
 use crate::async_runtime::watch::WatchSender;
 use crate::base::BoxAsyncOnceMut;
@@ -117,6 +125,8 @@ use crate::core::notification::Notification;
 use crate::core::raft_msg::RaftMsg;
 use crate::core::raft_msg::external_command::ExternalCommand;
 use crate::core::raft_msg::install_full_snapshot_request::InstallFullSnapshotRequest;
+use crate::core::runtime_stats::Recorder;
+#[cfg(feature = "runtime-stats")]
 use crate::core::runtime_stats::RuntimeStats;
 use crate::core::sm;
 use crate::core::sm::worker;
@@ -127,6 +137,7 @@ use crate::errors::ClientWriteError;
 use crate::errors::Fatal;
 use crate::errors::ForwardReason;
 use crate::errors::ForwardToLeader;
+use crate::errors::Infallible;
 use crate::errors::InitializeError;
 use crate::errors::LinearizableReadError;
 use crate::errors::RaftError;
@@ -142,6 +153,10 @@ use crate::metrics::WaitError;
 use crate::network::NetSnapshot;
 use crate::proposer::funding::Funding;
 use crate::proposer::funding::OneshotCharge;
+use crate::proposer::funding::Prepaid;
+use crate::proposer::funding::Shared;
+use crate::proposer::funding::sleep_bytes;
+use crate::proposer::funding::task_bytes;
 use crate::raft::raft_inner::RaftInner;
 use crate::raft::responder::ProgressResponder;
 pub use crate::raft::runtime_config_handle::RuntimeConfigHandle;
@@ -152,6 +167,8 @@ use crate::storage::RaftStateMachine;
 use crate::type_config::TypeConfigExt;
 use crate::type_config::alias::JoinErrorOf;
 use crate::type_config::alias::LogIdOf;
+use crate::type_config::alias::MpscOf;
+use crate::type_config::alias::MpscReceiverOf;
 use crate::type_config::alias::MpscSenderOf;
 use crate::type_config::alias::MpscWeakSenderOf;
 use crate::type_config::alias::NodeIdOf;
@@ -159,6 +176,7 @@ use crate::type_config::alias::OneshotReceiverOf;
 use crate::type_config::alias::OneshotSenderOf;
 use crate::type_config::alias::SnapshotOf;
 use crate::type_config::alias::VoteOf;
+use crate::type_config::alias::WatchOf;
 use crate::type_config::alias::WatchReceiverOf;
 use crate::type_config::alias::WriteResponderOf;
 use crate::vote::Vote;
@@ -361,7 +379,7 @@ where
     C: RaftTypeConfig,
     SM: RaftStateMachine<C>,
 {
-    inner: Arc<RaftInner<C>>,
+    inner: Shared<RaftInner<C>>,
     sm_cmd_tx: MpscWeakSenderOf<C, sm::Command<C, SM>>,
 
     /// Sender of the dedicated channel that delivers a full snapshot to RaftCore.
@@ -535,36 +553,136 @@ where
         id: C::NodeId,
         config: Arc<Config>,
         network: N,
-        mut log_store: LS,
-        mut state_machine: SM,
+        log_store: LS,
+        state_machine: SM,
     ) -> Result<Self, Fatal<C>>
     where
         N: RaftNetworkFactory<C>,
         N::Network: NetSnapshot<C, SnapshotData = SM::SnapshotData>,
         LS: RaftLogStorage<C>,
     {
+        Self::build_with(id, config, network, log_store, state_machine, Prepaid::unfunded()).await
+    }
+
+    /// [`build`](Self::build), with everything the node makes to start charged to `funder` before
+    /// any of it is made: the channels its handles and its core talk over, the blocks its handles
+    /// share, the box its start is held in, and the tasks [`run`](Self::run) spawns, the core's
+    /// box among them, each part holding its share of the charge until it is freed. Refused as
+    /// [`Unfunded`], nothing made, if `funder` refuses them or the runtime cannot say what one of
+    /// them allocates; once built, the node is funded by `funder` as
+    /// [`run_funded`](Self::run_funded) funds it, whichever way it is run.
+    ///
+    /// The tasks are spawned from their shares when the node is run: refused then as
+    /// [`Unfunded`] (or, by [`run`](Self::run), logged), the node stopped and the tasks spawned
+    /// before the refused one ending as what they wait on is dropped, if the runtime cannot make
+    /// one.
+    #[since(version = "0.10.0")]
+    #[tracing::instrument(level="debug", skip_all, fields(cluster=%config.cluster_name))]
+    pub async fn build_funded<LS, N>(
+        id: C::NodeId,
+        config: Arc<Config>,
+        network: N,
+        log_store: LS,
+        state_machine: SM,
+        funder: Arc<dyn Funder>,
+    ) -> Result<Self, RaftError<C>>
+    where
+        N: RaftNetworkFactory<C>,
+        N::Network: NetSnapshot<C, SnapshotData = SM::SnapshotData>,
+        LS: RaftLogStorage<C>,
+    {
+        let charge = Self::startup_bytes::<LS, N>(&config)
+            .and_then(|bytes| Charge::take(&funder, bytes))
+            .ok_or(Unfunded)?;
+        let prepaid = Prepaid::new(Some(charge), RaftError::Unfunded);
+        let raft = Self::build_with(id, config, network, log_store, state_machine, prepaid).await?;
+        // Set before anything else can: the node was just made.
+        let _ = raft.inner.funder.set(funder);
+        Ok(raft)
+    }
+
+    /// What [`build_funded`](Self::build_funded) charges for everything the node makes to start,
+    /// as [`build_with`](Self::build_with) and the start it builds make it: `None` if the runtime
+    /// cannot say what one part allocates, or the sum overflows.
+    fn startup_bytes<LS, N>(config: &Config) -> Option<usize>
+    where
+        N: RaftNetworkFactory<C>,
+        N::Network: NetSnapshot<C, SnapshotData = SM::SnapshotData>,
+        LS: RaftLogStorage<C>,
+    {
+        let api = config.api_channel_size();
+        let forwarder = |(rx_io, weak_tx_notify): (
+            WatchReceiverOf<C, Result<IOId<C>, StorageError<C>>>,
+            MpscWeakSenderOf<C, Notification<C>>,
+        )| { io_completion_forwarder::<C>(rx_io, weak_tx_notify) };
+        [
+            MpscOf::<C>::block_bytes::<RaftMsg<C>>(api)?,
+            MpscOf::<C>::block_bytes::<InstallFullSnapshotRequest<C, SM>>(api)?,
+            MpscOf::<C>::block_bytes::<Notification<C>>(config.notification_channel_size())?,
+            MpscOf::<C>::block_bytes::<sm::Command<C, SM>>(config.state_machine_channel_size())?,
+            WatchOf::<C>::block_bytes::<RaftMetrics<C>>()?,
+            WatchOf::<C>::block_bytes::<RaftDataMetrics<C>>()?,
+            WatchOf::<C>::block_bytes::<RaftServerMetrics<C>>()?,
+            WatchOf::<C>::block_bytes::<Result<IOId<C>, StorageError<C>>>()?,
+            // What the core announces as accepted, and as submitted.
+            WatchOf::<C>::block_bytes::<IOId<C>>()?.checked_mul(2)?,
+            WatchOf::<C>::block_bytes::<Option<LogIdOf<C>>>()?,
+            // Whether the tick is enabled, and whether the core has been joined.
+            WatchOf::<C>::block_bytes::<bool>()?.checked_mul(2)?,
+            IoProgressWatcher::<C>::channel_bytes()?,
+            Shared::<RuntimeConfig<C>>::block_bytes(),
+            Shared::<RaftInner<C>>::block_bytes(),
+            size_of::<CoreStart<C, N, LS, SM>>(),
+            worker::Worker::<C, SM, LS::LogReader>::spawn_bytes()?,
+            PendingReadDeadlineNotifier::<C>::spawn_bytes()?,
+            task_bytes::<C, _, _>(forwarder)?,
+            StepDownWatcher::<C>::spawn_bytes(config)?,
+            Tick::<C>::spawn_bytes()?,
+            task_bytes::<C, _, _>(CoreStart::<C, N, LS, SM>::core_task)?,
+            size_of::<RaftCore<C, N, LS, SM>>(),
+            // The one sleep at a time the core waits on.
+            sleep_bytes::<C>()?,
+        ]
+        .into_iter()
+        .try_fold(0usize, usize::checked_add)
+    }
+
+    /// Builds the node, each part made from its share of `prepaid`, refused as `R` if its share
+    /// is short; what starting the node makes is left in `prepaid` for its start.
+    async fn build_with<LS, N, R>(
+        id: C::NodeId,
+        config: Arc<Config>,
+        network: N,
+        mut log_store: LS,
+        mut state_machine: SM,
+        mut prepaid: Prepaid<C, R>,
+    ) -> Result<Self, R>
+    where
+        N: RaftNetworkFactory<C>,
+        N::Network: NetSnapshot<C, SnapshotData = SM::SnapshotData>,
+        LS: RaftLogStorage<C>,
+        R: From<Fatal<C>>,
+    {
         let api_channel_size = config.api_channel_size();
         let notification_channel_size = config.notification_channel_size();
 
-        let (tx_api, rx_api) = C::mpsc(api_channel_size);
-        let (tx_install_snapshot, rx_install_snapshot) = C::mpsc(api_channel_size);
-        let (tx_notify, rx_notify) = C::mpsc(notification_channel_size);
-        let (tx_metrics, rx_metrics) = C::watch_channel(RaftMetrics::new_initial(id.clone()));
-        let (tx_data_metrics, rx_data_metrics) = C::watch_channel(RaftDataMetrics::default());
-        let (tx_server_metrics, rx_server_metrics) = C::watch_channel(RaftServerMetrics::new_initial(id.clone()));
+        let (tx_api, rx_api) = prepaid.mpsc(api_channel_size)?;
+        let (tx_install_snapshot, rx_install_snapshot) = prepaid.mpsc(api_channel_size)?;
+        let (tx_notify, rx_notify) = prepaid.mpsc(notification_channel_size)?;
+        let (tx_metrics, rx_metrics) = prepaid.watch(RaftMetrics::new_initial(id.clone()))?;
+        let (tx_data_metrics, rx_data_metrics) = prepaid.watch(RaftDataMetrics::default())?;
+        let (tx_server_metrics, rx_server_metrics) = prepaid.watch(RaftServerMetrics::new_initial(id.clone()))?;
 
         // Watch channel for IO completion notifications from storage callbacks.
         // Initial value is a dummy IOId with this node's ID.
         let leader_id = C::LeaderId::new_with_default_term(id.clone());
         let dummy_io_id = IOId::Vote(UncommittedVote::new(leader_id));
-        let (tx_io_completed, rx_io_completed) = C::watch_channel(Ok(dummy_io_id));
+        let (tx_io_completed, rx_io_completed) = prepaid.watch(Ok(dummy_io_id))?;
 
-        // Create weak sender for forwarder before moving tx_notify into RaftCore
-        let weak_tx_notify = tx_notify.downgrade();
+        let (tx_progress, progress_watcher) = IoProgressWatcher::new(&mut prepaid)?;
 
-        let (tx_progress, progress_watcher) = IoProgressWatcher::new();
-
-        let runtime_config = Arc::new(RuntimeConfig::new(&config));
+        let (enable_tick, enable_tick_rx) = prepaid.watch(config.enable_tick)?;
+        let runtime_config = prepaid.shared(RuntimeConfig::new(&config, enable_tick))?;
 
         let core_span = tracing::span!(
             parent: tracing::Span::current(),
@@ -578,7 +696,7 @@ where
 
         let state = {
             let mut helper = StorageHelper::new(&mut log_store, &mut state_machine).with_id(id.clone());
-            helper.get_initial_state().await?
+            helper.get_initial_state().await.map_err(|err| R::from(Fatal::from(err)))?
         };
 
         let engine = Engine::new(state, eng_config);
@@ -586,122 +704,52 @@ where
         let sm_span = tracing::span!(parent: &core_span, Level::DEBUG, "sm_worker");
 
         let log_reader = log_store.get_log_reader().await;
-        let (sm_cmd_tx, sm_cmd_rx) = C::mpsc(config.state_machine_channel_size());
-        let weak_sm_cmd_tx = sm_cmd_tx.downgrade();
+        let sm_cmd = prepaid.mpsc(config.state_machine_channel_size())?;
+        let weak_sm_cmd_tx = sm_cmd.0.downgrade();
 
         let default_io_id = IOId::new_vote_io(UncommittedVote::new_with_default_term(id.clone()));
-        let (io_accepted_tx, _io_accepted_rx) = C::watch_channel(default_io_id.clone());
-        let (io_submitted_tx, _io_submitted_rx) = C::watch_channel(default_io_id);
-        let (committed_tx, _committed_rx) = C::watch_channel(None);
+        let (io_accepted_tx, _io_accepted_rx) = prepaid.watch(default_io_id.clone())?;
+        let (io_submitted_tx, _io_submitted_rx) = prepaid.watch(default_io_id)?;
+        let (committed_tx, _committed_rx) = prepaid.watch(None)?;
 
-        let shared_replicate_batch = SharedReplicateBatch::new();
-
-        let start = {
-            let id = id.clone();
-            let config = config.clone();
-            let runtime_config = runtime_config.clone();
-            let tx_api = tx_api.clone();
-            let tx_install_snapshot = tx_install_snapshot.clone();
-            let rx_metrics = rx_metrics.clone();
-            let rx_server_metrics = rx_server_metrics.clone();
-
-            Box::new(
-                move |inner: &RaftInner<C>,
-                      core_stop: OneshotReceiverOf<C, ()>,
-                      tick_stop: (OneshotSenderOf<C, ()>, OneshotReceiverOf<C, ()>)| {
-                    let mut engine = engine;
-                    engine.config.funding = Funding::new(inner.funder.get().cloned());
-
-                    let tick_tx = tx_notify.clone();
-                    let sm_handle = worker::Worker::spawn(
-                        id.clone(),
-                        state_machine,
-                        log_reader,
-                        tx_notify.clone(),
-                        (sm_cmd_tx, sm_cmd_rx),
-                        sm_span,
-                    );
-
-                    let core: RaftCore<C, N, LS, SM> = RaftCore {
-                        id: id.clone(),
-                        config: config.clone(),
-                        runtime_config: runtime_config.clone(),
-                        core_state: Default::default(),
-                        network_factory: Arc::new(C::mutex(network)),
-                        log_store,
-                        sm_handle,
-
-                        engine,
-
-                        // Grown as writes reserve room for their responders, each growth charged.
-                        client_responders: ClientResponderQueue::new(),
-
-                        pending_reads: PendingReadQueue::default(),
-                        pending_read_deadline_notifier: PendingReadDeadlineNotifier::spawn(tx_notify.clone()),
-                        replications: Default::default(),
-                        replications_funding: None,
-                        replications_room: 0,
-
-                        heartbeat_handle: HeartbeatWorkersHandle::new(id.clone(), config.clone()),
-                        tx_api: tx_api.clone(),
-                        rx_api: BatchRaftMsgReceiver::new(
-                            rx_api,
-                            config.api_batch_capacity,
-                            Duration::from_millis(config.api_batch_linger_ms),
-                        ),
-                        tx_install_snapshot: tx_install_snapshot.clone(),
-                        rx_install_snapshot,
-
-                        tx_notification: tx_notify,
-                        rx_notification: rx_notify.peekable(),
-
-                        io_broadcast: IoBroadcast {
-                            completed: tx_io_completed,
-                            accepted: io_accepted_tx,
-                            submitted: io_submitted_tx,
-                            committed: committed_tx,
-                        },
-
-                        metrics: MetricsChannels {
-                            all: tx_metrics,
-                            data: tx_data_metrics,
-                            server: tx_server_metrics,
-                            progress: tx_progress,
-                        },
-
-                        runtime_stats: RuntimeStats::new(&config),
-                        shared_replicate_batch,
-
-                        metrics_recorder: None,
-
-                        span: core_span,
-                    };
-
-                    // Spawn forwarder task to bridge Watch channel to notification channel
-                    let _forwarder_handle = C::spawn(io_completion_forwarder::<C>(rx_io_completed, weak_tx_notify));
-
-                    StepDownWatcher::<C>::spawn(
-                        rx_server_metrics.clone(),
-                        rx_metrics.clone(),
-                        tx_api.downgrade(),
-                        &config,
-                    );
-
-                    let core = Box::new(core);
-                    let core_fut = core.main(core_stop).instrument(trace_span!("spawn").or_current());
-                    let join_handle = C::spawn(core_fut);
-
-                    let tick_period = Duration::from_millis(config.tick_interval());
-                    let enabled = {
-                        let enable_tick = inner.runtime_config.enable_tick.lock().unwrap();
-                        enable_tick.subscribe()
-                    };
-                    let tick_handle = Tick::spawn(tick_period, tick_tx, enabled, tick_stop);
-                    *inner.tick_handle.lock().unwrap() = Some(tick_handle);
-                    join_handle
-                },
-            )
-        };
+        let inner_charge = prepaid.split(Shared::<RaftInner<C>>::block_bytes())?;
+        let start_charge = prepaid.split(size_of::<CoreStart<C, N, LS, SM>>())?;
+        let start: Box<dyn StartCore<C>> = Box::new(CoreStart {
+            id: id.clone(),
+            config: config.clone(),
+            runtime_config: runtime_config.clone(),
+            engine,
+            state_machine,
+            log_reader,
+            log_store,
+            network,
+            sm_cmd,
+            sm_span,
+            tx_api: tx_api.clone(),
+            rx_api,
+            tx_install_snapshot: tx_install_snapshot.clone(),
+            rx_install_snapshot,
+            tx_notify,
+            rx_notify,
+            io_broadcast: IoBroadcast {
+                completed: tx_io_completed,
+                accepted: io_accepted_tx,
+                submitted: io_submitted_tx,
+                committed: committed_tx,
+            },
+            metrics: MetricsChannels {
+                all: tx_metrics,
+                data: tx_data_metrics,
+                server: tx_server_metrics,
+                progress: tx_progress,
+            },
+            rx_metrics: rx_metrics.clone(),
+            rx_server_metrics: rx_server_metrics.clone(),
+            rx_io_completed,
+            enable_tick: enable_tick_rx,
+            core_span,
+            prepaid: prepaid.rest(),
+        });
 
         let inner = RaftInner {
             id,
@@ -714,13 +762,16 @@ where
             rx_server_metrics,
             progress_watcher,
             tx_shutdown: Mutex::new(None),
-            core_state: Mutex::new(CoreState::Unstarted(Some(start))),
+            core_state: Mutex::new(CoreState::Unstarted(Some(Unstarted {
+                start,
+                charge: start_charge,
+            }))),
             extensions: Extensions::default(),
             funder: OnceLock::new(),
         };
 
         Ok(Self {
-            inner: Arc::new(inner),
+            inner: Shared::new(inner, inner_charge),
             sm_cmd_tx: weak_sm_cmd_tx,
             install_snapshot_tx: tx_install_snapshot,
         })
@@ -729,13 +780,17 @@ where
     /// Start the Raft core task built by [`build`](Self::build).
     ///
     /// This method is idempotent: calling it on an already running or stopped node has no effect.
+    /// A node built by [`build_funded`](Self::build_funded) whose tasks the runtime refuses is
+    /// stopped, the refusal logged.
     #[since(version = "0.10.0")]
     pub fn run(&self) {
-        let started: Result<(), std::convert::Infallible> = self.start(None, |_| {
+        let started = self.start(None, |_| {
             let (core_tx, core_rx) = C::oneshot();
             Ok((core_tx, core_rx, C::oneshot()))
         });
-        let Ok(()) = started;
+        if let Err(Unfunded) = started {
+            tracing::error!("RaftCore of {} not started: its tasks were refused", self.inner.id);
+        }
     }
 
     /// [`run`](Self::run), with what the node allocates for its owner charged to `funder` before
@@ -766,28 +821,216 @@ where
 
     /// Start the core with the channels that stop it and its tick, made by `stops` for the
     /// funder the node is run with, unless the node already started; refused as `stops` is,
-    /// nothing started.
+    /// nothing started. A start whose tasks the runtime refuses is refused as [`Unfunded`], the
+    /// node stopped.
     fn start<E>(
         &self,
         funder: Option<Arc<dyn Funder>>,
         stops: impl FnOnce(Option<&Arc<dyn Funder>>) -> Result<StopChannels<C>, E>,
-    ) -> Result<(), E> {
+    ) -> Result<(), E>
+    where
+        E: From<Unfunded>,
+    {
         let mut state = self.inner.core_state.lock().unwrap();
-        let CoreState::Unstarted(start) = &mut *state else {
+        let CoreState::Unstarted(unstarted) = &mut *state else {
             return Ok(());
         };
 
         let (core_tx, core_rx, tick_stop) = stops(funder.as_ref())?;
         if let Some(funder) = funder {
-            // Only a start sets it, and a node starts once.
+            // Only a build or a start sets it, and a node is built and starts once: a node built
+            // funded keeps its funder.
             let _ = self.inner.funder.set(funder);
         }
         // Set while the state is held, so a shutdown either finds it or finds the node unstarted.
         *self.inner.tx_shutdown.lock().unwrap() = Some(core_tx);
-        let start = start.take().expect("unstarted Raft must have a start function");
-        let join_handle = start.start(self.inner.as_ref(), core_rx, tick_stop);
-        *state = CoreState::Running(join_handle);
-        Ok(())
+        let Unstarted { start, charge } = unstarted.take().expect("unstarted Raft must have a start function");
+        let started = start.start(&self.inner, core_rx, tick_stop);
+        // The box the start was held in is freed by now, so its charge goes back only now.
+        drop(charge);
+        match started {
+            Ok((join_handle, joined)) => {
+                *state = CoreState::Running(join_handle, joined);
+                Ok(())
+            }
+            Err(unfunded) => {
+                // No core runs to be told to stop.
+                drop(self.inner.tx_shutdown.lock().unwrap().take());
+                *state = CoreState::Done(Err(Fatal::Stopped));
+                Err(E::from(unfunded))
+            }
+        }
+    }
+}
+
+/// Everything a built node's RaftCore and its background tasks are made of, held in a box until
+/// the node starts, and the share of the node's charge for what starting it makes.
+struct CoreStart<C, N, LS, SM>
+where
+    C: RaftTypeConfig,
+    N: RaftNetworkFactory<C>,
+    LS: RaftLogStorage<C>,
+    SM: RaftStateMachine<C>,
+{
+    id: C::NodeId,
+    config: Arc<Config>,
+    runtime_config: Shared<RuntimeConfig<C>>,
+    engine: Engine<C>,
+    state_machine: SM,
+    log_reader: LS::LogReader,
+    log_store: LS,
+    network: N,
+    sm_cmd: (
+        MpscSenderOf<C, sm::Command<C, SM>>,
+        MpscReceiverOf<C, sm::Command<C, SM>>,
+    ),
+    sm_span: Span,
+    tx_api: MpscSenderOf<C, RaftMsg<C>>,
+    rx_api: MpscReceiverOf<C, RaftMsg<C>>,
+    tx_install_snapshot: MpscSenderOf<C, InstallFullSnapshotRequest<C, SM>>,
+    rx_install_snapshot: MpscReceiverOf<C, InstallFullSnapshotRequest<C, SM>>,
+    tx_notify: MpscSenderOf<C, Notification<C>>,
+    rx_notify: MpscReceiverOf<C, Notification<C>>,
+    io_broadcast: IoBroadcast<C>,
+    metrics: MetricsChannels<C>,
+    rx_metrics: WatchReceiverOf<C, RaftMetrics<C>>,
+    rx_server_metrics: WatchReceiverOf<C, RaftServerMetrics<C>>,
+    rx_io_completed: WatchReceiverOf<C, Result<IOId<C>, StorageError<C>>>,
+    enable_tick: WatchReceiverOf<C, bool>,
+    core_span: Span,
+    prepaid: Prepaid<C>,
+}
+
+impl<C, N, LS, SM> CoreStart<C, N, LS, SM>
+where
+    C: RaftTypeConfig,
+    N: RaftNetworkFactory<C>,
+    N::Network: NetSnapshot<C, SnapshotData = SM::SnapshotData>,
+    LS: RaftLogStorage<C>,
+    SM: RaftStateMachine<C>,
+{
+    /// The core's task: its main loop until `core_stop`.
+    fn core_task(
+        (core, core_stop): (Box<RaftCore<C, N, LS, SM>>, OneshotReceiverOf<C, ()>),
+    ) -> Instrumented<impl Future<Output = Result<Infallible, Fatal<C>>>> {
+        core.main(core_stop).instrument(trace_span!("spawn").or_current())
+    }
+}
+
+impl<C, N, LS, SM> StartCore<C> for CoreStart<C, N, LS, SM>
+where
+    C: RaftTypeConfig,
+    N: RaftNetworkFactory<C>,
+    N::Network: NetSnapshot<C, SnapshotData = SM::SnapshotData>,
+    LS: RaftLogStorage<C>,
+    SM: RaftStateMachine<C>,
+{
+    fn start(
+        self: Box<Self>,
+        inner: &RaftInner<C>,
+        core_stop: OneshotReceiverOf<C, ()>,
+        tick_stop: (OneshotSenderOf<C, ()>, OneshotReceiverOf<C, ()>),
+    ) -> Result<(CoreJoinHandle<C>, JoinWatch<C>), Unfunded> {
+        let CoreStart {
+            id,
+            config,
+            runtime_config,
+            mut engine,
+            state_machine,
+            log_reader,
+            log_store,
+            network,
+            sm_cmd,
+            sm_span,
+            tx_api,
+            rx_api,
+            tx_install_snapshot,
+            rx_install_snapshot,
+            tx_notify,
+            rx_notify,
+            io_broadcast,
+            metrics,
+            rx_metrics,
+            rx_server_metrics,
+            rx_io_completed,
+            enable_tick,
+            core_span,
+            mut prepaid,
+        } = *self;
+
+        let joined = prepaid.watch(false)?;
+        engine.config.funding = Funding::new(inner.funder.get().cloned());
+
+        let sm_handle = worker::Worker::spawn(
+            id.clone(),
+            state_machine,
+            log_reader,
+            tx_notify.clone(),
+            sm_cmd,
+            sm_span,
+            &mut prepaid,
+        )?;
+        let pending_read_deadline_notifier = PendingReadDeadlineNotifier::spawn(tx_notify.clone(), &mut prepaid)?;
+
+        // Spawn forwarder task to bridge Watch channel to notification channel
+        prepaid.spawn(io_completion_forwarder::<C>(rx_io_completed, tx_notify.downgrade()), 0)?;
+
+        StepDownWatcher::<C>::spawn(rx_server_metrics, rx_metrics, tx_api.downgrade(), &config, &mut prepaid)?;
+
+        let tick_period = Duration::from_millis(config.tick_interval());
+        let tick_handle = Tick::spawn(tick_period, tx_notify.clone(), enable_tick, tick_stop, &mut prepaid)?;
+
+        let core: RaftCore<C, N, LS, SM> = RaftCore {
+            id: id.clone(),
+            config: config.clone(),
+            runtime_config,
+            core_state: Default::default(),
+            network_factory: network,
+            log_store,
+            sm_handle,
+
+            engine,
+
+            // Grown as writes reserve room for their responders, each growth charged.
+            client_responders: ClientResponderQueue::new(),
+
+            pending_reads: PendingReadQueue::default(),
+            pending_read_deadline_notifier,
+            replications: Default::default(),
+            replications_funding: None,
+            replications_room: 0,
+
+            heartbeat_handle: HeartbeatWorkersHandle::new(id, config.clone()),
+            tx_api,
+            rx_api: BatchRaftMsgReceiver::new(
+                rx_api,
+                config.api_batch_capacity,
+                Duration::from_millis(config.api_batch_linger_ms),
+            ),
+            tx_install_snapshot,
+            rx_install_snapshot,
+
+            tx_notification: tx_notify,
+            rx_notification: rx_notify.peekable(),
+
+            io_broadcast,
+            metrics,
+
+            runtime_stats: Recorder::new(&config),
+            shared_replicate_batch: SharedReplicateBatch::new(),
+
+            metrics_recorder: None,
+
+            span: core_span,
+        };
+
+        // The core's box is charged before it is made, and freed before its charge goes back; so
+        // is the one sleep at a time the core waits on, lingering for a batch of client writes or
+        // for room to queue an event.
+        let held = prepaid.sleeping(size_of::<RaftCore<C, N, LS, SM>>())?;
+        let join_handle = prepaid.spawn_with(held, move || Self::core_task((Box::new(core), core_stop)))?;
+        *inner.tick_handle.lock().unwrap() = Some(tick_handle);
+        Ok((join_handle, joined))
     }
 }
 
@@ -808,7 +1051,7 @@ where
     /// raft.runtime_config().elect(true);
     /// ```
     pub fn runtime_config(&self) -> RuntimeConfigHandle<'_, C> {
-        RuntimeConfigHandle::new(self.inner.as_ref())
+        RuntimeConfigHandle::new(&self.inner)
     }
 
     /// Return the config of this Raft node.
@@ -1016,7 +1259,7 @@ where
     }
 
     pub(crate) fn management_api(&self) -> ManagementApi<'_, C> {
-        ManagementApi::new(self.inner.as_ref())
+        ManagementApi::new(&self.inner)
     }
 
     /// Return a [`Trigger`] handle to manually trigger raft actions, such as elect or build
@@ -1028,7 +1271,7 @@ where
     /// raft.trigger().elect(false).await?;
     /// ```
     pub fn trigger(&self) -> Trigger<'_, C> {
-        Trigger::new(self.inner.as_ref())
+        Trigger::new(&self.inner)
     }
 
     /// Set or unset a custom metrics recorder for exporting Raft metrics.

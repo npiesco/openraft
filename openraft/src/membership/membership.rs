@@ -393,6 +393,13 @@ where
         false
     }
 
+    /// Every voter with its node, in node id order: what [`voter_ids`](Self::voter_ids) yields,
+    /// read in place, where collecting the ids of every config allocates. A voter without a node,
+    /// which only an unchecked membership has, is not among them.
+    pub(crate) fn voters(&self) -> impl Iterator<Item = (&NID, &N)> {
+        self.nodes().filter(|(id, _)| self.is_voter(id))
+    }
+
     /// Create a new Membership the same as [`Self::new()`], but does not add the default
     /// value `Node::default()` if a voter id is not in `nodes`. Thus, it may create an invalid
     /// instance.

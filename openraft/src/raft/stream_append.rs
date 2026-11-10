@@ -1,7 +1,5 @@
 //! Stream-based AppendEntries API implementation with pipelining.
 
-use std::sync::Arc;
-
 use futures_util::Stream;
 use futures_util::StreamExt;
 
@@ -10,6 +8,7 @@ use crate::RaftTypeConfig;
 use crate::core::raft_msg::RaftMsg;
 use crate::errors::RaftError;
 use crate::errors::Unfunded;
+use crate::proposer::funding::Shared;
 use crate::raft::AppendEntriesRequest;
 use crate::raft::StreamAppendError;
 use crate::raft::raft_inner::RaftInner;
@@ -46,7 +45,7 @@ struct Pending<C: RaftTypeConfig> {
 /// `Err(RaftError::Unfunded)` alone.
 /// The background task exits when it fails to send to the dropped channel.
 pub(in crate::raft) fn stream_append<C, S>(
-    inner: Arc<RaftInner<C>>,
+    inner: Shared<RaftInner<C>>,
     input: S,
 ) -> impl Stream<Item = Result<StreamAppendResult<C>, RaftError<C>>> + OptionalSend + 'static
 where
@@ -83,9 +82,9 @@ where
 /// anything of it is made, the channel it sends their answers' channels on included, and returns
 /// that channel's receiver: refused as [`Unfunded`], nothing made and `input` dropped.
 fn pipeline<C, S>(
-    inner: Arc<RaftInner<C>>,
+    inner: Shared<RaftInner<C>>,
     input: S,
-) -> Result<(MpscReceiverOf<C, Pending<C>>, Arc<RaftInner<C>>), Unfunded>
+) -> Result<(MpscReceiverOf<C, Pending<C>>, Shared<RaftInner<C>>), Unfunded>
 where
     C: RaftTypeConfig,
     S: Stream<Item = AppendEntriesRequest<C>> + OptionalSend + 'static,

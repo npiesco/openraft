@@ -21,7 +21,6 @@ use crate::RaftTypeConfig;
 use crate::StorageError;
 use crate::async_runtime::Charge;
 use crate::async_runtime::MpscReceiver;
-use crate::async_runtime::Mutex;
 use crate::async_runtime::OneshotSender;
 use crate::async_runtime::Select2;
 use crate::async_runtime::Select4;
@@ -56,7 +55,7 @@ use crate::core::raft_msg::VoteTx;
 use crate::core::raft_msg::external_command::ExternalCommand;
 use crate::core::raft_msg::install_full_snapshot_request::InstallFullSnapshotRequest;
 use crate::core::raft_msg::membership_payloads::MembershipPayloads;
-use crate::core::runtime_stats::RuntimeStats;
+use crate::core::runtime_stats::Recorder;
 use crate::core::sm;
 use crate::core::stage::Stage;
 use crate::display_ext::DisplayInstantExt;
@@ -105,7 +104,12 @@ use crate::progress::stream_id::StreamId;
 use crate::proposer::Leader;
 use crate::proposer::LeaderQuorumSet;
 use crate::proposer::SendStamp;
+use crate::proposer::funding::Elapsed;
+use crate::proposer::funding::Prepaid;
+use crate::proposer::funding::Shared;
 use crate::proposer::funding::TaskCharge;
+use crate::proposer::funding::sleep_bytes;
+use crate::proposer::funding::within;
 use crate::raft::AppendEntriesRequest;
 use crate::raft::ClientWriteResult;
 use crate::raft::LogSegment;
@@ -145,7 +149,6 @@ use crate::type_config::alias::LogIdOf;
 use crate::type_config::alias::MembershipStateOf;
 use crate::type_config::alias::MpscReceiverOf;
 use crate::type_config::alias::MpscSenderOf;
-use crate::type_config::alias::MutexOf;
 use crate::type_config::alias::OneshotReceiverOf;
 use crate::type_config::alias::PayloadOf;
 use crate::type_config::alias::VoteOf;
@@ -213,13 +216,14 @@ where
     /// This node's runtime config.
     pub(crate) config: Arc<Config>,
 
-    pub(crate) runtime_config: Arc<RuntimeConfig<C>>,
+    pub(crate) runtime_config: Shared<RuntimeConfig<C>>,
 
     /// Additional state that does not directly affect the consensus.
     pub(crate) core_state: CoreState<C>,
 
-    /// The `RaftNetworkFactory` implementation.
-    pub(crate) network_factory: Arc<MutexOf<C, NF>>,
+    /// The `RaftNetworkFactory` implementation, used only by this core: held inline, it is
+    /// borrowed while a client is made, and allocates no lock or block of its own.
+    pub(crate) network_factory: NF,
 
     /// The [`RaftLogStorage`] implementation.
     pub(crate) log_store: LS,
@@ -283,11 +287,12 @@ where
     /// The watch channels that publish this node's state for observers.
     pub(crate) metrics: MetricsChannels<C>,
 
-    /// Runtime statistics for Raft operations.
+    /// Runtime statistics for Raft operations, recorded only if the `runtime-stats` feature can
+    /// read them.
     ///
     /// Owned directly by RaftCore for lock-free access to most stats.
     /// Only `replicate_batch` is shared with replication tasks via `shared_replicate_batch`.
-    pub(crate) runtime_stats: RuntimeStats<C>,
+    pub(crate) runtime_stats: Recorder<C>,
 
     /// Shared histogram for replication batch sizes.
     ///
@@ -1236,10 +1241,7 @@ where
         let (backoff_reset_tx, backoff_reset_rx) = task.watch(()).ok()?;
         let (cancel_tx, cancel_rx) = task.watch(()).ok()?;
 
-        let network = {
-            let mut factory = self.network_factory.lock().await;
-            factory.new_client(target.clone(), node).await
-        };
+        let network = self.network_factory.new_client(target.clone(), node).await;
 
         let event_watcher = self.new_event_watcher(replicate_rx);
         let replication_context = self.new_replication_context(leader_vote, target, stream_id, cancel_rx);
@@ -1681,14 +1683,15 @@ where
             };
 
             async move {
+                let deadline = C::now() + ttl;
                 let tm_res = match kind {
-                    VoteRequestKind::Vote => C::timeout(ttl, client.vote(req, option)).await,
-                    VoteRequestKind::PreVote => C::timeout(ttl, client.pre_vote(req, option)).await,
+                    VoteRequestKind::Vote => within::<C, _>(deadline, client.vote(req, option)).await,
+                    VoteRequestKind::PreVote => within::<C, _>(deadline, client.pre_vote(req, option)).await,
                 };
                 let res = match tm_res {
                     Ok(res) => res,
 
-                    Err(_timeout) => {
+                    Err(Elapsed) => {
                         let timeout_err = Timeout::<C> {
                             action: RPCTypes::Vote,
                             id,
@@ -1746,11 +1749,16 @@ where
             );
 
             async move {
-                let tm_res = C::timeout(ttl, client.transfer_leader(r, option)).await;
+                let tm_res = within::<C, _>(C::now() + ttl, client.transfer_leader(r, option)).await;
                 let res = match tm_res {
                     Ok(res) => res,
-                    Err(timeout) => {
-                        tracing::warn!("timeout sending transfer_leader: {}, target: {}", timeout, target);
+                    Err(elapsed) => {
+                        tracing::warn!(
+                            "timeout sending transfer_leader: {} after {:?}, target: {}",
+                            elapsed,
+                            ttl,
+                            target
+                        );
                         return;
                     }
                 };
@@ -2447,14 +2455,14 @@ where
         }
 
         if self.heartbeat_handle.has_unspawned() {
-            let mut factory = self.network_factory.lock().await;
+            let factory = &mut self.network_factory;
             let spawning = Spawning {
                 leader_vote: committed_vote,
                 tx_notification: &self.tx_notification,
                 membership: self.engine.state.membership_state.effective().membership(),
                 funding: &self.engine.config.funding,
             };
-            self.heartbeat_handle.spawn_unspawned::<NF>(spawning, &mut *factory).await;
+            self.heartbeat_handle.spawn_unspawned::<NF>(spawning, factory).await;
         }
 
         let Ok(lh) = self.engine.try_leader_handler() else {
@@ -2668,7 +2676,9 @@ where
             return;
         };
 
-        let mut task = match TaskCharge::<C, _>::take(&self.engine.config.funding, WatchOf::<C>::block_bytes::<()>) {
+        // The channel that cancels it, and the one sleep at a time it waits out its backoff on.
+        let parts = || WatchOf::<C>::block_bytes::<()>()?.checked_add(sleep_bytes::<C>()?);
+        let mut task = match TaskCharge::<C, _>::take(&self.engine.config.funding, parts) {
             Ok(task) => task,
             Err(Unfunded) => {
                 tracing::warn!(
@@ -2694,10 +2704,7 @@ where
             return;
         };
 
-        let snapshot_network = {
-            let mut factory = self.network_factory.lock().await;
-            factory.new_snapshot_client(target.clone(), node).await
-        };
+        let snapshot_network = self.network_factory.new_snapshot_client(target.clone(), node).await;
 
         let snapshot_reader = self.sm_handle.new_snapshot_reader(self.engine.config.funding.clone());
         let replication_task_context = self.new_replication_context(leader_vote, &target, stream_id, cancel_rx);
@@ -2824,16 +2831,14 @@ where
         funding: Option<Charge>,
     ) {
         let heartbeats_complete = {
-            let mut factory = self.network_factory.lock().await;
+            let factory = &mut self.network_factory;
             let spawning = Spawning {
                 leader_vote: leader_vote.clone(),
                 tx_notification: &self.tx_notification,
                 membership: self.engine.state.membership_state.effective().membership(),
                 funding: &self.engine.config.funding,
             };
-            self.heartbeat_handle
-                .spawn_workers::<NF>(spawning, &mut *factory, &targets, close_old_streams)
-                .await
+            self.heartbeat_handle.spawn_workers::<NF>(spawning, factory, &targets, close_old_streams).await
         };
 
         self.rebuild_replications(leader_vote, &targets, close_old_streams).await;

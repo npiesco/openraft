@@ -1,6 +1,9 @@
+use std::future::Future;
+
 use display_more::DisplayOptionExt;
 use futures_util::TryStreamExt;
 use tracing::Instrument;
+use tracing::instrument::Instrumented;
 
 use crate::RaftLogReader;
 use crate::RaftSnapshotBuilder;
@@ -16,13 +19,15 @@ use crate::core::sm::Response;
 use crate::core::sm::handle::Handle;
 use crate::entry::RaftEntry;
 use crate::errors::StorageIOResult;
+use crate::errors::Unfunded;
+use crate::proposer::funding::Prepaid;
+use crate::proposer::funding::task_bytes;
 use crate::raft::responder::core_responder::CoreResponder;
 #[cfg(doc)]
 use crate::storage::RaftLogStorage;
 use crate::storage::RaftStateMachine;
 use crate::storage::v2::entry_responder::EntryResponderBuilder;
 use crate::type_config::TypeConfigExt;
-use crate::type_config::alias::JoinHandleOf;
 use crate::type_config::alias::LogIdOf;
 use crate::type_config::alias::MpscReceiverOf;
 use crate::type_config::alias::MpscSenderOf;
@@ -58,7 +63,8 @@ where
     SM: RaftStateMachine<C>,
     LR: RaftLogReader<C>,
 {
-    /// Spawn a new state machine worker, return a controlling handle.
+    /// Spawn a new state machine worker, its task made from its share of `prepaid`, and return a
+    /// controlling handle: refused, nothing spawned, if `prepaid` holds too few.
     pub(crate) fn spawn(
         id: C::NodeId,
         state_machine: SM,
@@ -66,7 +72,8 @@ where
         resp_tx: MpscSenderOf<C, Notification<C>>,
         cmd_channel: (MpscSenderOf<C, Command<C, SM>>, MpscReceiverOf<C, Command<C, SM>>),
         span: tracing::Span,
-    ) -> Handle<C, SM> {
+        prepaid: &mut Prepaid<C>,
+    ) -> Result<Handle<C, SM>, Unfunded> {
         let (cmd_tx, cmd_rx) = cmd_channel;
 
         let worker = Worker {
@@ -77,27 +84,34 @@ where
             resp_tx,
         };
 
-        let join_handle = worker.do_spawn(span);
+        let join_handle = prepaid.spawn(Self::task((worker, span)), 0)?;
 
-        Handle { cmd_tx, join_handle }
+        Ok(Handle { cmd_tx, join_handle })
     }
 
-    fn do_spawn(mut self, span: tracing::Span) -> JoinHandleOf<C, ()> {
-        let fu = async move {
-            let res = self.worker_loop().await;
+    /// What the runtime charges the worker's task.
+    pub(crate) fn spawn_bytes() -> Option<usize> {
+        task_bytes::<C, _, _>(Self::task)
+    }
+
+    /// The worker's task: its loop in `span`, until RaftCore stops sending it commands.
+    fn task((mut worker, span): (Self, tracing::Span)) -> Instrumented<impl Future<Output = ()>> {
+        async move {
+            let res = worker.worker_loop().await;
 
             if let Err(err) = res {
                 tracing::error!("{} while execute state machine command", err,);
 
-                self.resp_tx
+                worker
+                    .resp_tx
                     .send(Notification::StateMachine {
                         command_result: CommandResult { result: Err(err) },
                     })
                     .await
                     .ok();
             }
-        };
-        C::spawn(fu.instrument(span))
+        }
+        .instrument(span)
     }
 
     #[tracing::instrument(level = "debug", skip_all)]

@@ -15,6 +15,7 @@ use crate::core::notification::Notification;
 use crate::network::NetStreamAppend;
 use crate::network::RPCOption;
 use crate::progress::stream_id::StreamId;
+use crate::proposer::funding::within;
 use crate::raft::AppendEntriesRequest;
 use crate::raft::StreamAppendError;
 use crate::raft::StreamAppendResult;
@@ -114,7 +115,9 @@ where
             // A ready future is `Unpin`, so the one-request stream needs no box.
             let input_stream = futures_util::stream::once(futures_util::future::ready(payload));
 
-            let res = C::timeout(timeout, async {
+            // Bounded by one sleep, which the task holds, where the runtime's timeout may box the
+            // request.
+            let res = within::<C, _>(C::now() + timeout, async {
                 let mut output = self.network.stream_append(input_stream, option).await?.fuse();
                 let res = output.next().await.transpose();
                 // Poll output until it returns `None`, which should be the very next value, to

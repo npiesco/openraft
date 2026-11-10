@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use openraft_macros::since;
 
 use crate::RaftTypeConfig;
@@ -11,6 +9,7 @@ use crate::errors::Fatal;
 use crate::errors::LinearizableReadError;
 use crate::errors::RaftError;
 use crate::impls::ProgressResponder;
+use crate::proposer::funding::Shared;
 use crate::raft::ClientWriteResponse;
 use crate::raft::ClientWriteResult;
 use crate::raft::linearizable_read::Linearizer;
@@ -35,13 +34,13 @@ use crate::type_config::alias::WriteResponderOf;
 pub(crate) struct AppApi<'a, C>
 where C: RaftTypeConfig
 {
-    inner: &'a Arc<RaftInner<C>>,
+    inner: &'a Shared<RaftInner<C>>,
 }
 
 impl<'a, C> AppApi<'a, C>
 where C: RaftTypeConfig
 {
-    pub(in crate::raft) fn new(inner: &'a Arc<RaftInner<C>>) -> Self {
+    pub(in crate::raft) fn new(inner: &'a Shared<RaftInner<C>>) -> Self {
         Self { inner }
     }
 

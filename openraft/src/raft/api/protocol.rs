@@ -1,4 +1,3 @@
-use std::sync::Arc;
 use std::time::Duration;
 
 use display_more::DisplayOptionExt;
@@ -17,6 +16,7 @@ use crate::errors::Fatal;
 use crate::errors::RaftError;
 #[cfg(doc)]
 use crate::errors::into_raft_result::IntoRaftResult;
+use crate::proposer::funding::Shared;
 use crate::raft::AppendEntriesRequest;
 use crate::raft::AppendEntriesResponse;
 use crate::raft::SnapshotResponse;
@@ -76,7 +76,7 @@ where
     C: RaftTypeConfig,
     SM: RaftStateMachine<C>,
 {
-    inner: Arc<RaftInner<C>>,
+    inner: Shared<RaftInner<C>>,
 
     /// Sender to the state machine worker, for requests that RaftCore just forwards.
     sm_cmd_tx: MpscWeakSenderOf<C, sm::Command<C, SM>>,
@@ -94,7 +94,7 @@ where
     SM: RaftStateMachine<C>,
 {
     pub(in crate::raft) fn new(
-        inner: Arc<RaftInner<C>>,
+        inner: Shared<RaftInner<C>>,
         sm_cmd_tx: MpscWeakSenderOf<C, sm::Command<C, SM>>,
         install_snapshot_tx: MpscSenderOf<C, InstallFullSnapshotRequest<C, SM>>,
     ) -> Self {

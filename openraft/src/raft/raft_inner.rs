@@ -29,6 +29,7 @@ use crate::metrics::RaftDataMetrics;
 use crate::metrics::RaftServerMetrics;
 use crate::metrics::Wait;
 use crate::proposer::funding::OneshotCharge;
+use crate::proposer::funding::Shared;
 use crate::proposer::funding::TaskCharge;
 use crate::raft::core_state::CoreState;
 use crate::type_config::AsyncRuntime;
@@ -54,7 +55,7 @@ where C: RaftTypeConfig
 {
     pub(in crate::raft) id: C::NodeId,
     pub(in crate::raft) config: Arc<Config>,
-    pub(in crate::raft) runtime_config: Arc<RuntimeConfig<C>>,
+    pub(in crate::raft) runtime_config: Shared<RuntimeConfig<C>>,
     pub(in crate::raft) tick_handle: Mutex<Option<TickHandle<C>>>,
     pub(in crate::raft) tx_api: MpscSenderOf<C, RaftMsg<C>>,
     pub(in crate::raft) rx_metrics: WatchReceiverOf<C, RaftMetrics<C>>,
@@ -298,14 +299,13 @@ where C: RaftTypeConfig
                     *state = CoreState::Done(Err(Fatal::Stopped));
                     return;
                 }
-                CoreState::Running(_) => {
-                    let (tx, rx) = C::watch_channel::<bool>(false);
+                CoreState::Running(..) => {
+                    let prev = std::mem::replace(&mut *state, CoreState::Done(Err(Fatal::Stopped)));
 
-                    let prev = std::mem::replace(&mut *state, CoreState::Joining(rx));
-
-                    let CoreState::Running(join_handle) = prev else {
+                    let CoreState::Running(join_handle, (tx, rx)) = prev else {
                         unreachable!()
                     };
+                    *state = CoreState::Joining(rx);
 
                     Ok((join_handle, tx))
                 }

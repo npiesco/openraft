@@ -1,5 +1,6 @@
 //! tick emitter emits a `RaftMsg::Tick` event at a certain interval.
 
+use std::future::Future;
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -7,12 +8,17 @@ use rand::RngExt;
 use tracing::Instrument;
 use tracing::Level;
 use tracing::Span;
+use tracing::instrument::Instrumented;
 
 use crate::AsyncRuntime;
 use crate::RaftTypeConfig;
 use crate::async_runtime::Select2;
 use crate::async_runtime::watch::WatchReceiver;
 use crate::core::notification::Notification;
+use crate::errors::Unfunded;
+use crate::proposer::funding::Prepaid;
+use crate::proposer::funding::sleep_bytes;
+use crate::proposer::funding::task_bytes;
 use crate::type_config::TypeConfigExt;
 use crate::type_config::alias::AsyncRuntimeOf;
 use crate::type_config::alias::JoinHandleOf;
@@ -59,13 +65,15 @@ impl<C> Tick<C>
 where C: RaftTypeConfig
 {
     /// Spawn the tick loop, stopped through `stop`: a channel made by the caller, its block funded
-    /// by the caller before it was made.
+    /// by the caller before it was made. Its task is made from its share of `prepaid`: refused,
+    /// nothing spawned, if `prepaid` holds too few.
     pub(crate) fn spawn(
         period: Duration,
         tx: MpscSenderOf<C, Notification<C>>,
         enabled: WatchReceiverOf<C, bool>,
         stop: (OneshotSenderOf<C, ()>, OneshotReceiverOf<C, ()>),
-    ) -> TickHandle<C> {
+        prepaid: &mut Prepaid<C>,
+    ) -> Result<TickHandle<C>, Unfunded> {
         let this = Self {
             period,
             first_wait: Self::sample_first_wait(period),
@@ -75,17 +83,26 @@ where C: RaftTypeConfig
 
         let (shutdown, shutdown_rx) = stop;
 
-        let shutdown = Mutex::new(Some(shutdown));
-        let join_handle = C::spawn(this.tick_loop(shutdown_rx).instrument(tracing::span!(
-            parent: &Span::current(),
-            Level::DEBUG,
-            "tick"
-        )));
+        let span = tracing::span!(parent: &Span::current(), Level::DEBUG, "tick");
+        // Its loop sleeps until each tick: one sleep at a time, held with the task.
+        let held = prepaid.sleeping(0)?;
+        let join_handle = prepaid.spawn(Self::task((this, shutdown_rx, span)), held)?;
 
-        TickHandle {
-            shutdown,
+        Ok(TickHandle {
+            shutdown: Mutex::new(Some(shutdown)),
             join_handle: Mutex::new(Some(join_handle)),
-        }
+        })
+    }
+
+    /// What the runtime charges the tick loop's task and the sleep it holds: `None` if it cannot
+    /// fund them.
+    pub(crate) fn spawn_bytes() -> Option<usize> {
+        task_bytes::<C, _, _>(Self::task)?.checked_add(sleep_bytes::<C>()?)
+    }
+
+    /// The tick loop's task: the loop until `cancel_rx`, in `span`.
+    fn task((this, cancel_rx, span): (Self, OneshotReceiverOf<C, ()>, Span)) -> Instrumented<impl Future<Output = ()>> {
+        this.tick_loop(cancel_rx).instrument(span)
     }
 
     /// Add a random phase offset from `[0, period)` to the first wait.
@@ -224,6 +241,7 @@ mod tests {
     use crate::async_runtime::watch::WatchSender;
     use crate::core::Tick;
     use crate::core::notification::Notification;
+    use crate::proposer::funding::Prepaid;
     use crate::type_config::TypeConfigExt;
     use crate::type_config::alias::MpscReceiverOf;
     use crate::type_config::async_runtime::oneshot::OneshotSender;
@@ -360,7 +378,14 @@ mod tests {
             // A first wait far longer than this test's own timeout: the loop can only finish by
             // observing the shutdown signal.
             let (_enable_tx, enabled) = TickUTConfig::watch_channel(true);
-            let th = Tick::<TickUTConfig>::spawn(Duration::from_secs(10), tx, enabled, TickUTConfig::oneshot());
+            let th = Tick::<TickUTConfig>::spawn(
+                Duration::from_secs(10),
+                tx,
+                enabled,
+                TickUTConfig::oneshot(),
+                &mut Prepaid::unfunded(),
+            )
+            .unwrap();
 
             TickUTConfig::sleep(Duration::from_millis(50)).await;
             let join_handle = th.shutdown().unwrap();
@@ -388,7 +413,14 @@ mod tests {
         run_seeded(SEED, async {
             let (tx, mut rx) = SeededTickConfig::mpsc(1024);
             let (_enable_tx, enabled) = SeededTickConfig::watch_channel(true);
-            let th = Tick::<SeededTickConfig>::spawn(period, tx, enabled, SeededTickConfig::oneshot());
+            let th = Tick::<SeededTickConfig>::spawn(
+                period,
+                tx,
+                enabled,
+                SeededTickConfig::oneshot(),
+                &mut Prepaid::unfunded(),
+            )
+            .unwrap();
 
             let early_first =
                 SeededTickConfig::timeout(first_wait - margin, recv_tick::<SeededTickConfig>(&mut rx)).await;
@@ -427,7 +459,9 @@ mod tests {
             // until this task drains it, and the tick loop is held past its own schedule.
             let (tx, mut rx) = TickUTConfig::mpsc(1);
             let (_enable_tx, enabled) = TickUTConfig::watch_channel(true);
-            let th = Tick::<TickUTConfig>::spawn(PERIOD, tx, enabled, TickUTConfig::oneshot());
+            let th =
+                Tick::<TickUTConfig>::spawn(PERIOD, tx, enabled, TickUTConfig::oneshot(), &mut Prepaid::unfunded())
+                    .unwrap();
 
             TickUTConfig::sleep(STALL).await;
 
@@ -454,7 +488,14 @@ mod tests {
             // Capacity one throttles the busy loop to this task's receive rate.
             let (tx, mut rx) = TickUTConfig::mpsc(1);
             let (_enable_tx, enabled) = TickUTConfig::watch_channel(true);
-            let th = Tick::<TickUTConfig>::spawn(Duration::ZERO, tx, enabled, TickUTConfig::oneshot());
+            let th = Tick::<TickUTConfig>::spawn(
+                Duration::ZERO,
+                tx,
+                enabled,
+                TickUTConfig::oneshot(),
+                &mut Prepaid::unfunded(),
+            )
+            .unwrap();
 
             for expected in 1..=3 {
                 let i = TickUTConfig::timeout(Duration::from_secs(1), recv_tick::<TickUTConfig>(&mut rx))
@@ -489,7 +530,14 @@ mod tests {
             // loop sleeps through the deadlines at `first_wait + 3 * PERIOD` and `+ 4 * PERIOD`.
             let (tx, mut rx) = SeededTickConfig::mpsc(1);
             let (_enable_tx, enabled) = SeededTickConfig::watch_channel(true);
-            let th = Tick::<SeededTickConfig>::spawn(PERIOD, tx, enabled, SeededTickConfig::oneshot());
+            let th = Tick::<SeededTickConfig>::spawn(
+                PERIOD,
+                tx,
+                enabled,
+                SeededTickConfig::oneshot(),
+                &mut Prepaid::unfunded(),
+            )
+            .unwrap();
 
             SeededTickConfig::sleep(first_wait + STALL).await;
 
@@ -666,7 +714,9 @@ mod tests {
             // one blocked in `send()`. Receiving more than that proves the loop is running.
             let (tx, mut rx) = TickUTConfig::mpsc(1);
             let (switch, enabled) = TickUTConfig::watch_channel(true);
-            let th = Tick::<TickUTConfig>::spawn(PERIOD, tx, enabled, TickUTConfig::oneshot());
+            let th =
+                Tick::<TickUTConfig>::spawn(PERIOD, tx, enabled, TickUTConfig::oneshot(), &mut Prepaid::unfunded())
+                    .unwrap();
 
             recv_tick::<TickUTConfig>(&mut rx).await;
             let start = std::time::Instant::now();

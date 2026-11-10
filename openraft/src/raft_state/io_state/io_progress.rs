@@ -35,7 +35,6 @@ where T: PartialOrd + fmt::Debug
     /// The highest I/O operation confirmed as durably persisted.
     flushed: Option<T>,
 
-    id: String,
     name: &'static str,
 }
 
@@ -57,8 +56,7 @@ where
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "id={:<2} {:>7}:(flushed/submitted:({}, {}], accepted: {})",
-            self.id,
+            "{:>7}:(flushed/submitted:({}, {}], accepted: {})",
             self.name,
             self.flushed.display(),
             self.submitted.display(),
@@ -75,19 +73,14 @@ where
     /// Create a new IOProgress with all cursors synchronized to the same value.
     ///
     /// Used for initialization or snapshot installation to align all IO tracking.
-    pub(crate) fn new_synchronized(v: Option<T>, id: impl ToString, name: &'static str) -> Self
+    pub(crate) fn new_synchronized(v: Option<T>, name: &'static str) -> Self
     where T: Clone {
         Self {
             accepted: v.clone(),
             submitted: v.clone(),
             flushed: v.clone(),
-            id: id.to_string(),
             name,
         }
-    }
-
-    pub(crate) fn set_id(&mut self, id: impl ToString) {
-        self.id = id.to_string();
     }
 
     /// Update the `accept` cursor of the I/O progress.
@@ -201,7 +194,7 @@ mod tests {
 
     #[test]
     fn test_monotonic_updates() {
-        let mut progress = IOProgress::new_synchronized(Some(10), 1, "test");
+        let mut progress = IOProgress::new_synchronized(Some(10), "test");
 
         // Monotonic updates should work
         progress.accept(11);
@@ -218,7 +211,7 @@ mod tests {
     #[should_panic(expected = "expect accepted:11 < new_accepted:10")]
     #[cfg(debug_assertions)]
     fn test_accept_enforces_strict_monotonicity() {
-        let mut progress = IOProgress::new_synchronized(Some(10), 1, "test");
+        let mut progress = IOProgress::new_synchronized(Some(10), "test");
         progress.accept(11);
         progress.accept(10); // Should panic - out of order
     }
@@ -227,14 +220,14 @@ mod tests {
     #[should_panic(expected = "expect submitted:11 < new_submitted:10")]
     #[cfg(debug_assertions)]
     fn test_submit_enforces_strict_monotonicity() {
-        let mut progress = IOProgress::new_synchronized(Some(10), 1, "test");
+        let mut progress = IOProgress::new_synchronized(Some(10), "test");
         progress.submit(11);
         progress.submit(10); // Should panic - out of order
     }
 
     #[test]
     fn test_flush_tolerates_out_of_order() {
-        let mut progress = IOProgress::new_synchronized(Some(10), 1, "test");
+        let mut progress = IOProgress::new_synchronized(Some(10), "test");
 
         // Flush uses conditional update logic
         progress.try_flush(11);
@@ -247,7 +240,7 @@ mod tests {
 
     #[test]
     fn test_try_update_all() {
-        let mut progress = IOProgress::new_synchronized(Some(10), 1, "test");
+        let mut progress = IOProgress::new_synchronized(Some(10), "test");
         progress.try_update_all(15);
         assert_eq!(Some(&15), progress.accepted());
         assert_eq!(Some(&15), progress.submitted());
@@ -262,7 +255,7 @@ mod tests {
 
     #[test]
     fn test_try_accept() {
-        let mut progress = IOProgress::new_synchronized(Some(10), 1, "test");
+        let mut progress = IOProgress::new_synchronized(Some(10), "test");
 
         // Update with greater value - should update
         progress.try_accept(15);
@@ -283,7 +276,7 @@ mod tests {
 
     #[test]
     fn test_try_submit() {
-        let mut progress = IOProgress::new_synchronized(Some(10), 1, "test");
+        let mut progress = IOProgress::new_synchronized(Some(10), "test");
 
         // Update with greater value - should update
         progress.try_submit(15);
@@ -304,7 +297,7 @@ mod tests {
 
     #[test]
     fn test_try_flush() {
-        let mut progress = IOProgress::new_synchronized(Some(10), 1, "test");
+        let mut progress = IOProgress::new_synchronized(Some(10), "test");
 
         // Update with greater value - should update
         progress.try_flush(15);

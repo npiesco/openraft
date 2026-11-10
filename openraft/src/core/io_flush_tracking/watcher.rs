@@ -1,14 +1,16 @@
 use super::FlushPoint;
 use crate::RaftTypeConfig;
 use crate::Vote;
+use crate::async_runtime::watch::Watch;
 use crate::core::io_flush_tracking::AppliedProgress;
 use crate::core::io_flush_tracking::CommitProgress;
 use crate::core::io_flush_tracking::LogProgress;
 use crate::core::io_flush_tracking::SnapshotProgress;
 use crate::core::io_flush_tracking::VoteProgress;
 use crate::core::io_flush_tracking::sender::IoProgressSender;
-use crate::type_config::TypeConfigExt;
+use crate::proposer::funding::Prepaid;
 use crate::type_config::alias::LogIdOf;
+use crate::type_config::alias::WatchOf;
 use crate::type_config::alias::WatchReceiverOf;
 
 /// I/O flush progress watch handles.
@@ -55,17 +57,18 @@ where C: RaftTypeConfig
 impl<C> IoProgressWatcher<C>
 where C: RaftTypeConfig
 {
-    /// Create a new progress watcher/sender pair.
+    /// Create a new progress watcher/sender pair, each channel made from its share of `prepaid`:
+    /// refused if `prepaid` holds too few.
     ///
     /// Returns `(IoProgressSender, IoProgressWatcher)` where:
     /// - The sender is used by RaftCore to publish flush notifications
     /// - The watcher is used to create watch handles for applications
-    pub(crate) fn new() -> (IoProgressSender<C>, Self) {
-        let (log_tx, log) = C::watch_channel(None);
-        let (vote_tx, vote) = C::watch_channel(None);
-        let (commit_tx, commit) = C::watch_channel(None);
-        let (snapshot_tx, snapshot) = C::watch_channel(None);
-        let (apply_tx, apply) = C::watch_channel(None);
+    pub(crate) fn new<R>(prepaid: &mut Prepaid<C, R>) -> Result<(IoProgressSender<C>, Self), R> {
+        let (log_tx, log) = prepaid.watch(None)?;
+        let (vote_tx, vote) = prepaid.watch(None)?;
+        let (commit_tx, commit) = prepaid.watch(None)?;
+        let (snapshot_tx, snapshot) = prepaid.watch(None)?;
+        let (apply_tx, apply) = prepaid.watch(None)?;
 
         let sender = IoProgressSender {
             log_tx,
@@ -82,7 +85,15 @@ where C: RaftTypeConfig
             apply,
         };
 
-        (sender, watcher)
+        Ok((sender, watcher))
+    }
+
+    /// What the progress channels allocate: `None` if the runtime cannot fund them.
+    pub(crate) fn channel_bytes() -> Option<usize> {
+        let log = WatchOf::<C>::block_bytes::<Option<FlushPoint<C>>>()?;
+        let vote = WatchOf::<C>::block_bytes::<Option<Vote<C::LeaderId>>>()?;
+        let log_id = WatchOf::<C>::block_bytes::<Option<LogIdOf<C>>>()?;
+        log.checked_add(vote)?.checked_add(log_id.checked_mul(3)?)
     }
 
     /// Create a watch handle for log I/O flush progress.

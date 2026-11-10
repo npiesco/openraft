@@ -43,7 +43,6 @@ where
     pub(crate) state_machine: &'a mut SM,
 
     id: Option<C::NodeId>,
-    id_str: String,
 
     _p: PhantomData<C>,
 }
@@ -61,7 +60,6 @@ where
             log_store: sto,
             state_machine: sm,
             id: None,
-            id_str: "xx".to_string(),
             _p: Default::default(),
         }
     }
@@ -69,7 +67,6 @@ where
     /// Set the ID of this node
     #[since(version = "0.10.0")]
     pub fn with_id(mut self, id: C::NodeId) -> Self {
-        self.id_str = id.to_string();
         self.id = Some(id);
         self
     }
@@ -211,7 +208,6 @@ where
         let snapshot_meta = snapshot.map(|x| x.meta).unwrap_or_default();
 
         let io_state = IOState::new(
-            &self.id_str,
             &vote,
             last_applied.clone(),
             snapshot_meta.last_log_id.clone(),

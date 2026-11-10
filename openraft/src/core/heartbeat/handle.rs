@@ -25,6 +25,7 @@ use crate::network::NetStreamAppend;
 use crate::progress::stream_id::StreamId;
 use crate::proposer::funding::Funding;
 use crate::proposer::funding::TaskCharge;
+use crate::proposer::funding::sleep_bytes;
 use crate::proposer::funding::spawned_bytes;
 use crate::proposer::funding::tree_bytes;
 use crate::type_config::alias::CommittedVoteOf;
@@ -111,11 +112,12 @@ where
 }
 
 /// The blocks of the channels a heartbeat worker holds: the one that stops it and the one it is
-/// sent heartbeats on.
+/// sent heartbeats on; and the one sleep at a time it bounds each heartbeat by, which its task
+/// holds as what is left of its charge.
 fn worker_parts_bytes<C: RaftTypeConfig>() -> Option<usize> {
     let stop = OneshotOf::<C>::block_bytes::<()>()?;
     let events = WatchOf::<C>::block_bytes::<Option<HeartbeatEvent<C>>>()?;
-    stop.checked_add(events)
+    stop.checked_add(events)?.checked_add(sleep_bytes::<C>()?)
 }
 
 /// What a spawn of heartbeat workers makes each of them with, besides its target and client:
