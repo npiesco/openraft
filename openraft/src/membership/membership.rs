@@ -876,6 +876,7 @@ mod tests {
         use std::sync::atomic::AtomicUsize;
         use std::sync::atomic::Ordering;
 
+        use crate::OwnerRefused;
         use crate::metered::metered;
         use crate::metered::refusing;
 
