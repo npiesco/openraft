@@ -148,11 +148,13 @@ const fn rebuild_bytes<C: RaftTypeConfig>(tracked: usize, voters: usize, learner
         + progress_bytes::<C::NodeId, ClockEntry<C>>(voters, learners)
 }
 
-/// At most how many voters and learners a proposer built from `membership` tracks: every id of
-/// every config (a joint membership's two configs may share some), and every node.
+/// At most how many voters and learners a proposer built from `membership` tracks: its distinct
+/// voters, no more than the ids of all its configs nor than its nodes, every voter being one,
+/// and its nodes.
 fn tracked<NID: NodeId, N: Node>(membership: &Membership<NID, N>) -> (usize, usize) {
-    let voters = membership.get_joint_config().iter().map(|config| config.len()).sum();
-    (voters, membership.nodes().count())
+    let nodes = membership.nodes().count();
+    let voters = membership.get_joint_config().iter().map(|config| config.len()).sum::<usize>();
+    (voters.min(nodes), nodes)
 }
 
 /// What a Candidate built from `membership` is charged.
@@ -182,13 +184,13 @@ pub(crate) fn rebuild_state_bytes<C: RaftTypeConfig>(
 /// memberships of at most `members` nodes: a Pre-Vote round's Candidate, an election's Candidate
 /// with the Leader it is charged for in advance, two Leaders (one built without an election
 /// while an older one is still held), and the rebuild of a Leader's progress for an appended
-/// membership. A joint membership's two configs are counted apart, as `2 * members` voters.
+/// membership. Every voter is a node, and a progress tracks no more entries than nodes, so each
+/// is sized as `members` voters, `members` learners and `members` tracked entries.
 #[since(version = "0.10.0")]
 pub const fn proposer_state_bytes<C: RaftTypeConfig>(members: usize) -> usize {
-    let voters = 2 * members;
-    let candidate = candidate_bytes::<C>(voters, members);
-    let leader = leader_bytes::<C>(voters, members);
-    2 * candidate + 3 * leader + rebuild_bytes::<C>(voters + members, voters, members)
+    let candidate = candidate_bytes::<C>(members, members);
+    let leader = leader_bytes::<C>(members, members);
+    2 * candidate + 3 * leader + rebuild_bytes::<C>(members, members, members)
 }
 
 #[cfg(test)]
