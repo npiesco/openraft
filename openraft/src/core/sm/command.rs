@@ -57,7 +57,13 @@ where
     /// Apply a typed function to the state machine.
     ///
     /// The function receives a mutable reference to the concrete state machine type `SM`.
-    ExternalFunc { func: BoxAsyncOnceMut<'static, SM> },
+    ExternalFunc {
+        func: BoxAsyncOnceMut<'static, SM>,
+
+        /// What the boxes of `func` and of the future it returns are charged, declared after
+        /// `func`: credited back only once both are freed.
+        boxed: Option<Charge>,
+    },
 }
 
 impl<C, SM> Command<C, SM>

@@ -1857,8 +1857,10 @@ where
 
                 self.append_membership(payload, preconditions, tx);
             }
-            RaftMsg::WithRaftState { req } => {
+            RaftMsg::WithRaftState { req, boxed } => {
                 req(&self.engine.state);
+                // Running `req` freed its box.
+                drop(boxed);
             }
             RaftMsg::HandleTransferLeader {
                 from: current_leader_vote,

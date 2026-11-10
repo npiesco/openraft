@@ -135,6 +135,15 @@ where C: RaftTypeConfig
         Ok(self.call_core(make_msg(tx), rx).await?)
     }
 
+    /// `bytes` charged to the node's funder before what they fund is made, to be held until it is
+    /// freed; refused as [`Unfunded`], charging nothing. A node run unfunded charges nothing.
+    pub(crate) fn charge(&self, bytes: usize) -> Result<Option<Charge>, Unfunded> {
+        match self.funder.get() {
+            Some(funder) => Charge::take(funder, bytes).map(Some).ok_or(Unfunded),
+            None => Ok(None),
+        }
+    }
+
     /// A oneshot channel a caller waits on for RaftCore's answer: on a node run funded, its block
     /// charged to the node's funder before it is made, the charge held until both halves are
     /// dropped and the block is freed; refused as [`Unfunded`], nothing allocated, if the funder

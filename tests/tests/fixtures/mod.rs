@@ -36,7 +36,6 @@ use openraft::Vote;
 use openraft::alias::SnapshotOf;
 use openraft::async_runtime::Mutex as AsyncMutex;
 use openraft::errors::ClientWriteError;
-use openraft::errors::Fatal;
 use openraft::errors::LinearizableReadError;
 use openraft::errors::NetworkError;
 use openraft::errors::RPCError;
@@ -780,7 +779,7 @@ impl TypedRaftRouter {
         &self,
         target: MemNodeId,
         req: F,
-    ) -> Result<(), Fatal<MemConfig>> {
+    ) -> Result<(), RaftError<MemConfig>> {
         let r = self.get_raft_handle(&target).unwrap();
         r.external_request(req).await
     }

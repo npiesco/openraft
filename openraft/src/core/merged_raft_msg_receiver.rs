@@ -348,7 +348,12 @@ mod tests {
 
             let leader = Some(committed_leader_id(1, 1));
             tx.send(client_write(1, leader)).await.unwrap();
-            tx.send(RaftMsg::WithRaftState { req: Box::new(|_| {}) }).await.unwrap();
+            tx.send(RaftMsg::WithRaftState {
+                req: Box::new(|_| {}),
+                boxed: None,
+            })
+            .await
+            .unwrap();
             tx.send(client_write(2, leader)).await.unwrap();
 
             receiver.ensure_buffered().await.unwrap();

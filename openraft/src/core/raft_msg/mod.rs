@@ -7,6 +7,7 @@ use display_more::DisplaySliceExt;
 use crate::ChangeMembers;
 use crate::RaftState;
 use crate::RaftTypeConfig;
+use crate::async_runtime::Charge;
 use crate::base::BoxOnce;
 use crate::core::raft_msg::external_command::ExternalCommand;
 use crate::core::raft_msg::membership_payloads::MembershipPayloads;
@@ -141,6 +142,10 @@ where C: RaftTypeConfig
 
     WithRaftState {
         req: BoxOnce<'static, RaftState<C>>,
+
+        /// What the box of `req` is charged, declared after it: credited back only once the box
+        /// is freed.
+        boxed: Option<Charge>,
     },
 
     /// Transfer Leader to another node.

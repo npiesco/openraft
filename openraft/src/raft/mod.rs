@@ -11,6 +11,7 @@
 pub(crate) mod api;
 #[cfg(test)]
 mod declare_raft_types_test;
+mod external_func;
 mod impl_raft_blocking_write;
 pub mod linearizable_read;
 pub(crate) mod message;
@@ -78,6 +79,7 @@ use crate::RaftState;
 pub use crate::RaftTypeConfig;
 use crate::StorageError;
 use crate::StorageHelper;
+use crate::async_runtime::Charge;
 use crate::async_runtime::Funder;
 use crate::async_runtime::MpscWeakSender;
 use crate::async_runtime::OneshotSender;
@@ -86,6 +88,7 @@ use crate::async_runtime::mpsc::MpscReceiver;
 use crate::async_runtime::mpsc::MpscSender;
 use crate::async_runtime::watch::WatchReceiver;
 use crate::async_runtime::watch::WatchSender;
+use crate::base::BoxAsyncOnceMut;
 use crate::base::BoxFuture;
 use crate::base::BoxOnce;
 use crate::base::BoxStream;
@@ -151,6 +154,7 @@ use crate::type_config::alias::MpscSenderOf;
 use crate::type_config::alias::MpscWeakSenderOf;
 use crate::type_config::alias::NodeIdOf;
 use crate::type_config::alias::OneshotReceiverOf;
+use crate::type_config::alias::OneshotSenderOf;
 use crate::type_config::alias::SnapshotOf;
 use crate::type_config::alias::VoteOf;
 use crate::type_config::alias::WatchReceiverOf;
@@ -1587,7 +1591,8 @@ where
     /// The function `func` is applied to the current [`RaftState`]. The result of this function,
     /// of type `V`, is returned wrapped in `Result<V, RaftError<C>>`. `Fatal` error will be
     /// returned if failed to receive a reply from `RaftCore`; [`Unfunded`], nothing sent, if the
-    /// node's funder refuses the channel the reply arrives on (see [`Raft::run_funded`]).
+    /// node's funder refuses the channel the reply arrives on or the box `func` is sent in, both
+    /// charged before either is made (see [`Raft::run_funded`]).
     ///
     /// A `Fatal` error is returned if:
     /// - Raft core task is stopped normally.
@@ -1604,15 +1609,12 @@ where
         F: FnOnce(&RaftState<C>) -> V + OptionalSend + 'static,
         V: OptionalSend + 'static,
     {
-        let (tx, rx) = self.inner.oneshot()?;
+        let mut channel = self.inner.oneshot_charge::<V>(1)?;
+        let reply = external_func::state_reply::<C, F, V, OneshotSenderOf<C, V>>;
+        let boxed = self.inner.charge(external_func::size_of_output(reply))?;
+        let (tx, rx) = channel.channel()?;
 
-        self.external_request(|st| {
-            let result = func(st);
-            if let Err(_err) = tx.send(result) {
-                tracing::error!("{}: to-Raft tx send error", func_name!());
-            }
-        })
-        .await?;
+        self.send_state_fn(Box::new(reply(func, tx)), boxed).await?;
 
         match rx.await {
             Ok(res) => Ok(res),
@@ -1638,14 +1640,29 @@ where
     /// in the closure of the request functor, which can then be used to send the response
     /// asynchronously.
     ///
+    /// The box `req` is sent in is charged to the node's funder before it is made, and credited
+    /// back once the core ran `req` and freed it: refused as [`Unfunded`], nothing sent (see
+    /// [`Raft::run_funded`]).
+    ///
     /// Returns a `Fatal` error if:
     /// - Raft core task is stopped normally.
     /// - Raft core task is panicked due to programming error.
     /// - Raft core task is encountered a storage error.
-    pub async fn external_request<F>(&self, req: F) -> Result<(), Fatal<C>>
+    #[since(version = "0.10.0", change = "fails as `RaftError`, which may be `Unfunded`")]
+    pub async fn external_request<F>(&self, req: F) -> Result<(), RaftError<C>>
     where F: FnOnce(&RaftState<C>) + OptionalSend + 'static {
-        let req: BoxOnce<'static, RaftState<C>> = Box::new(req);
-        self.inner.send_msg(RaftMsg::WithRaftState { req }).await
+        let boxed = self.inner.charge(size_of::<F>())?;
+        self.send_state_fn(Box::new(req), boxed).await
+    }
+
+    /// Sends `req` to run on the core, with `boxed`, what its box is charged, held until the core
+    /// ran it and freed the box.
+    async fn send_state_fn(
+        &self,
+        req: BoxOnce<'static, RaftState<C>>,
+        boxed: Option<Charge>,
+    ) -> Result<(), RaftError<C>> {
+        Ok(self.inner.send_msg(RaftMsg::WithRaftState { req, boxed }).await?)
     }
 
     /// Get a handle to the metrics channel.
@@ -2141,8 +2158,9 @@ where
     ///
     /// The function `func` is applied to the current [`RaftStateMachine`]. The result of this
     /// function, of type `V`, is returned wrapped in `Result<V, RaftError<C>>`: [`Unfunded`],
-    /// nothing sent, if the node's funder refuses the channel the result arrives on (see
-    /// [`Raft::run_funded`]).
+    /// nothing sent, if the node's funder refuses the channel the result arrives on or the boxes
+    /// `func` is run from, all charged before any is made (see [`Raft::run_funded`]). The future
+    /// `func` returns is the caller's own allocation.
     ///
     /// A `Fatal` error is returned if:
     /// - Raft core task is stopped normally.
@@ -2165,17 +2183,15 @@ where
         F: FnOnce(&mut SM) -> BoxFuture<V> + OptionalSend + 'static,
         V: OptionalSend + 'static,
     {
-        let (tx, rx) = self.inner.oneshot()?;
+        let mut channel = self.inner.oneshot_charge::<V>(1)?;
+        let reply = external_func::sm_reply::<SM, F, V, OneshotSenderOf<C, V>>;
+        // The box of the function the worker runs, and the box of the future it returns.
+        let boxes =
+            external_func::size_of_output(reply) + size_of::<external_func::Reply<'static, V, OneshotSenderOf<C, V>>>();
+        let boxed = self.inner.charge(boxes)?;
+        let (tx, rx) = channel.channel()?;
 
-        self.external_state_machine_request(|sm| {
-            Box::pin(async move {
-                let resp = func(sm).await;
-                if let Err(_err) = tx.send(resp) {
-                    tracing::error!("{}: failed to send response to user tx", func_name!());
-                }
-            })
-        })
-        .await?;
+        self.send_sm_func(Box::new(reply(func, tx)), boxed).await?;
 
         // Use the bounded receive: the state-machine worker owns the responder and can die on its
         // own (e.g. a panic in `func`) while RaftCore keeps running. An unbounded join on the core
@@ -2193,25 +2209,41 @@ where
     /// The request functor will be called with a mutable reference to the state machine.
     /// The functor returns a [`Future`] because state machine methods are `async`.
     ///
+    /// The box `req` is sent in is charged to the node's funder before it is made, and credited
+    /// back once the worker ran `req` and freed it: refused as [`Unfunded`], nothing sent (see
+    /// [`Raft::run_funded`]). The future `req` returns is the caller's own allocation.
+    ///
     /// Returns a `Fatal` error if:
     /// - Raft core task is stopped normally.
     /// - Raft core task is panicked due to programming error.
     /// - Raft core task is encountered a storage error.
+    #[since(version = "0.10.0", change = "fails as `RaftError`, which may be `Unfunded`")]
     #[since(version = "0.10.0")]
-    pub async fn external_state_machine_request<F>(&self, req: F) -> Result<(), Fatal<C>>
+    pub async fn external_state_machine_request<F>(&self, req: F) -> Result<(), RaftError<C>>
     where
         SM: OptionalSend + 'static,
         F: FnOnce(&mut SM) -> BoxFuture<()> + OptionalSend + 'static,
     {
+        let boxed = self.inner.charge(size_of::<F>())?;
+        self.send_sm_func(Box::new(req), boxed).await
+    }
+
+    /// Sends `func` to run in the state machine worker, with `boxed`, what its boxes are charged,
+    /// held until the worker ran it and freed them.
+    async fn send_sm_func(
+        &self,
+        func: BoxAsyncOnceMut<'static, SM>,
+        boxed: Option<Charge>,
+    ) -> Result<(), RaftError<C>>
+    where
+        SM: OptionalSend + 'static,
+    {
         let Some(tx) = self.sm_cmd_tx.upgrade() else {
-            return Err(self.inner.get_core_stop_error_bounded().await);
+            return Err(self.inner.get_core_stop_error_bounded().await.into());
         };
 
-        let sm_cmd = sm::Command::ExternalFunc {
-            func: Box::new(move |sm| req(sm)),
-        };
-        if tx.send(sm_cmd).await.is_err() {
-            return Err(self.inner.get_core_stop_error_bounded().await);
+        if tx.send(sm::Command::ExternalFunc { func, boxed }).await.is_err() {
+            return Err(self.inner.get_core_stop_error_bounded().await.into());
         }
         Ok(())
     }

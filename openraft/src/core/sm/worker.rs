@@ -156,9 +156,11 @@ where
                     let res = CommandResult::new(Ok(Response::Apply(resp)));
                     self.resp_tx.send(Notification::sm(res)).await.ok();
                 }
-                Command::ExternalFunc { func } => {
+                Command::ExternalFunc { func, boxed } => {
                     tracing::debug!("{}: run user defined ExternalFunc", func_name!());
                     func(&mut self.state_machine).await;
+                    // Calling `func` freed its box, and the future it returned is freed.
+                    drop(boxed);
                 }
             };
         }
