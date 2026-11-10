@@ -115,6 +115,10 @@ where C: RaftTypeConfig
 
         preconditions: BatchOf<C, Precondition<C>>,
 
+        /// What `preconditions` were charged when they hold more than a batch keeps inline, held
+        /// until they are freed with this message, by `RaftCore` or with it unhandled.
+        held: Option<Charge>,
+
         tx: ProgressResponder<C, ClientWriteResult<C>>,
     },
 

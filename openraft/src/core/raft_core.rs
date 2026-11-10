@@ -2029,6 +2029,7 @@ where
                 payloads,
                 retain,
                 preconditions,
+                held,
                 tx,
             } => {
                 tracing::info!(
@@ -2040,6 +2041,8 @@ where
                 );
 
                 self.change_membership(changes, retain, preconditions, payloads, tx);
+                // The preconditions were freed as they were checked.
+                drop(held);
             }
             RaftMsg::AppendMembership {
                 payload,
