@@ -6,6 +6,7 @@
 //! freed: the charge is held by the state it funds, declared after what it funds. A node
 //! [`run`](crate::Raft::run) without a funder charges nothing.
 
+use std::collections::VecDeque;
 use std::fmt;
 use std::future::Future;
 use std::marker::PhantomData;
@@ -77,6 +78,28 @@ impl Funding {
         T: OptionalSend,
     {
         OneshotCharge::<C, T>::take(self.0.as_ref(), 1)?.channel()
+    }
+
+    /// Room in `queue` for `room` more items. On a node with a funder, the whole capacity it
+    /// grows to is charged before it is reserved and held in `held` in place of the charge for
+    /// the capacity it had, credited back only once the buffer that capacity was is freed; refused
+    /// as [`Unfunded`], nothing is allocated or charged. An unfunded node's queue grows as it is
+    /// pushed to.
+    pub(crate) fn reserve<T>(
+        &self,
+        queue: &mut VecDeque<T>,
+        held: &mut Option<Charge>,
+        room: usize,
+    ) -> Result<(), Unfunded> {
+        let needed = queue.len().saturating_add(room);
+        if !self.is_funded() || queue.capacity() >= needed {
+            return Ok(());
+        }
+        let capacity = needed.max(queue.capacity().saturating_mul(2));
+        let charge = self.charge(capacity.saturating_mul(size_of::<T>()))?;
+        queue.try_reserve_exact(capacity - queue.len()).map_err(|_| Unfunded)?;
+        *held = charge;
+        Ok(())
     }
 }
 

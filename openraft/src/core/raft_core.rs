@@ -23,6 +23,7 @@ use crate::async_runtime::Charge;
 use crate::async_runtime::MpscReceiver;
 use crate::async_runtime::Mutex;
 use crate::async_runtime::OneshotSender;
+use crate::async_runtime::Select2;
 use crate::async_runtime::Select4;
 use crate::async_runtime::TryRecvError;
 use crate::async_runtime::mpsc::PeekableReceiver;
@@ -64,6 +65,7 @@ use crate::engine::Condition;
 use crate::engine::Engine;
 use crate::engine::Respond;
 use crate::engine::TargetProgress;
+use crate::engine::event_commands;
 use crate::engine::handler::leader_handler::LeaderHandler;
 use crate::engine::leader_log_ids::LeaderLogIds;
 use crate::entry::RaftEntry;
@@ -365,9 +367,10 @@ where
 
     #[tracing::instrument(level = "trace", skip_all, fields(id=display(&self.id), cluster=%self.config.cluster_name
     ))]
-    async fn do_main(&mut self, rx_shutdown: OneshotReceiverOf<C, ()>) -> Result<Infallible, Fatal<C>> {
+    async fn do_main(&mut self, mut rx_shutdown: OneshotReceiverOf<C, ()>) -> Result<Infallible, Fatal<C>> {
         tracing::debug!("raft node is initializing");
 
+        self.wait_for_event_room(&mut rx_shutdown).await?;
         self.engine.startup();
         // It may not finish running all the commands, if there is a command waiting for a callback.
         self.run_engine_commands().await?;
@@ -1347,7 +1350,7 @@ where
                 self.engine.output.len()
             );
 
-            if self.engine.output.postpone_command(cmd).is_ok() {
+            if self.engine.output.postpone_command(cmd, &self.engine.config.funding).is_ok() {
                 continue;
             }
 
@@ -1431,6 +1434,10 @@ where
             // In each loop, the first step is blocking waiting for any message from any channel.
             // Then if there is any message, process as many as possible to maximize throughput.
 
+            // The event selected below is handled before any other is taken: its room is charged
+            // first.
+            self.wait_for_event_room(&mut rx_shutdown).await?;
+
             // Check shutdown first so that a message flood in `tx_api` won't block shutting down.
             let selected = C::select4(
                 &mut rx_shutdown,
@@ -1490,11 +1497,36 @@ where
                 }
             }
 
-            // Trigger routine actions after processing all messages
-            self.trigger_routine_actions();
+            // Trigger routine actions after processing all messages; refused their room, they are
+            // tried again after the next event.
+            if self.reserve_event_room().is_ok() {
+                self.trigger_routine_actions();
+            }
 
             self.run_engine_commands().await?;
         }
+    }
+
+    /// Room in the Engine's command queue for the commands one event queues
+    /// ([`event_commands`]), charged before the event is taken: refused as [`Unfunded`], nothing
+    /// is allocated or charged, and the event is left where it is.
+    fn reserve_event_room(&mut self) -> Result<(), Unfunded> {
+        let targets = self.engine.state.membership_state.effective().nodes().count();
+        self.engine.output.reserve(&self.engine.config.funding, event_commands(targets))
+    }
+
+    /// Wait until room for one event's commands is charged ([`Self::reserve_event_room`]),
+    /// trying again every tick, or until the core is shut down.
+    async fn wait_for_event_room(&mut self, rx_shutdown: &mut OneshotReceiverOf<C, ()>) -> Result<(), Fatal<C>> {
+        let tick = Duration::from_millis(self.config.tick_interval());
+        while self.reserve_event_room().is_err() {
+            tracing::debug!("room for an event's commands refused, trying again in {:?}", tick);
+            if let Select2::First(_) = C::select2(&mut *rx_shutdown, C::sleep(tick)).await {
+                tracing::info!("recv from rx_shutdown");
+                return Err(Fatal::Stopped);
+            }
+        }
+        Ok(())
     }
 
     /// Process RaftMsg up to the budget, yielding to ready notifications in eager mode.
@@ -1522,6 +1554,11 @@ where
                         return Err(Fatal::Stopped);
                     }
                 }
+            }
+
+            // Refused room for its commands, a message is left in the channel until room is charged.
+            if self.reserve_event_room().is_err() {
+                break;
             }
 
             let res = self.rx_api.try_recv().await?;
@@ -1568,6 +1605,12 @@ where
         let mut processed = 0u64;
 
         for _i in 0..at_most {
+            // Refused room for its commands, a notification is left in the channel until room is
+            // charged.
+            if self.reserve_event_room().is_err() {
+                break;
+            }
+
             let res = self.rx_notification.try_recv();
             let notify = match res {
                 Ok(msg) => msg,

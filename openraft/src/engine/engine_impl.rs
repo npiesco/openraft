@@ -123,7 +123,7 @@ where
             leader: None,
             candidate: None,
             pre_candidate: None,
-            output: EngineOutput::new(4096),
+            output: EngineOutput::default(),
         }
     }
 

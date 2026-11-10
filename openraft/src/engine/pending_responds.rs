@@ -2,8 +2,11 @@ use std::collections::VecDeque;
 use std::fmt;
 
 use crate::RaftTypeConfig;
+use crate::async_runtime::Charge;
+use crate::engine::Condition;
 use crate::engine::Respond;
 use crate::engine::respond_command::PendingRespond;
+use crate::proposer::funding::Funding;
 use crate::raft_state::IOId;
 use crate::raft_state::io_state::IOState;
 use crate::type_config::alias::LogIdOf;
@@ -24,18 +27,44 @@ where C: RaftTypeConfig
 
     /// Responds waiting for snapshot to be built.
     pub(crate) on_snapshot: VecDeque<PendingRespond<C, LogIdOf<C>>>,
+
+    /// The charges for the capacities of the queues above, in their order, each taken before
+    /// that capacity was reserved; declared after them, so each is credited back only once the
+    /// buffer it funds is freed.
+    funding: [Option<Charge>; 4],
 }
 
 impl<C> PendingResponds<C>
 where C: RaftTypeConfig
 {
-    pub(crate) fn new(capacity: usize) -> Self {
-        Self {
-            on_log_io: VecDeque::with_capacity(capacity),
-            on_log_flush: VecDeque::with_capacity(capacity),
-            on_apply: VecDeque::with_capacity(capacity),
-            on_snapshot: VecDeque::with_capacity(capacity),
+    /// Queue `resp` to wait for `when`, its room charged to `funding` before it is reserved:
+    /// refused, nothing is allocated or charged, and both are given back.
+    pub(crate) fn push(
+        &mut self,
+        when: Option<Condition<C>>,
+        resp: Respond<C>,
+        funding: &Funding,
+    ) -> Result<(), (Condition<C>, Respond<C>)> {
+        let Some(when) = when else {
+            unreachable!("Respond command to postpone must have a condition");
+        };
+        let [io, flush, apply, snapshot] = &mut self.funding;
+        let reserved = match &when {
+            Condition::IOFlushed { .. } => funding.reserve(&mut self.on_log_io, io, 1),
+            Condition::LogFlushed { .. } => funding.reserve(&mut self.on_log_flush, flush, 1),
+            Condition::Applied { .. } => funding.reserve(&mut self.on_apply, apply, 1),
+            Condition::Snapshot { .. } => funding.reserve(&mut self.on_snapshot, snapshot, 1),
+        };
+        if reserved.is_err() {
+            return Err((when, resp));
         }
+        match when {
+            Condition::IOFlushed { io_id } => self.on_log_io.push_back(PendingRespond::new(io_id, resp)),
+            Condition::LogFlushed { log_id } => self.on_log_flush.push_back(PendingRespond::new(log_id, resp)),
+            Condition::Applied { log_id } => self.on_apply.push_back(PendingRespond::new(log_id, resp)),
+            Condition::Snapshot { log_id } => self.on_snapshot.push_back(PendingRespond::new(log_id, resp)),
+        }
+        Ok(())
     }
 
     /// Drain all satisfied responds based on the current IO state.
