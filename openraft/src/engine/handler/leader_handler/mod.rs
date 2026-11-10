@@ -101,7 +101,9 @@ where
         payloads: I,
         funded: Option<Charge>,
     ) -> Option<LeaderLogIds<CommittedLeaderIdOf<C>>>
-    where I: IntoIterator<Item = PayloadOf<C>> + AsRef<[PayloadOf<C>]> {
+    where
+        I: IntoIterator<Item = PayloadOf<C>> + AsRef<[PayloadOf<C>]>,
+    {
         let log_ids = self.leader.assign_log_ids(payloads.as_ref().len())?;
 
         self.state.extend_log_ids_from_same_leader(log_ids.clone());

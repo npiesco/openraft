@@ -26,7 +26,6 @@ use crate::async_runtime::Select2;
 use crate::async_runtime::Select4;
 use crate::async_runtime::TryRecvError;
 use crate::async_runtime::mpsc::PeekableReceiver;
-use crate::async_runtime::watch::Watch;
 use crate::async_runtime::watch::WatchSender;
 use crate::batch::Batch;
 use crate::config::Config;
@@ -3131,7 +3130,6 @@ where
 #[cfg(test)]
 mod tests {
     use std::fmt;
-    use std::sync::Arc;
 
     use maplit::btreemap;
     use maplit::btreeset;

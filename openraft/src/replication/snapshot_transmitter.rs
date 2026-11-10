@@ -5,6 +5,7 @@ use crate::RaftNetworkFactory;
 use crate::RaftTypeConfig;
 use crate::StorageError;
 use crate::async_runtime::MpscSender;
+use crate::async_runtime::RuntimeBytes;
 use crate::async_runtime::Select2;
 use crate::async_runtime::watch::Watch;
 use crate::async_runtime::watch::WatchReceiver;
@@ -19,7 +20,10 @@ use crate::network::NetSnapshot;
 use crate::network::RPCOption;
 use crate::progress::inflight_id::InflightId;
 use crate::proposer::funding::sleep_bytes;
+use crate::proposer::funding::sleep_const_bytes;
 use crate::proposer::funding::task_bytes;
+use crate::proposer::funding::task_const_bytes;
+use crate::proposer::funding::watch_const_bytes;
 use crate::replication::EXHAUSTED_BACKOFF_DELAY;
 use crate::replication::replication_context::ReplicationContext;
 use crate::replication::replication_context::backoff_of;
@@ -53,6 +57,25 @@ where
 {
     task_bytes::<C, _, _>(SnapshotTransmitter::<C, NF, SM>::stream_snapshot)?
         .checked_add(snapshot_transmitter_parts_bytes::<C>()?)
+}
+
+/// [`snapshot_transmitter_bytes`] known when the program is compiled, from what the runtime
+/// tells of its tasks, channels and sleeps when compiled ([`RuntimeBytes`]): the same sum of
+/// exactly what a transmitter makes, and the same figure whenever the runtime's is `Some`. A
+/// node sizes what it funds its transmitters with in a `const` with it, moving with the types the
+/// transmitter is made of: its task's future holds the client's snapshot send in place.
+#[since(version = "0.10.0")]
+pub const fn snapshot_transmitter_const_bytes<C, NF, SM>() -> usize
+where
+    C: RaftTypeConfig,
+    C::AsyncRuntime: RuntimeBytes,
+    NF: RaftNetworkFactory<C>,
+    NF::Network: NetSnapshot<C, SnapshotData = SM::SnapshotData>,
+    SM: RaftStateMachine<C>,
+{
+    task_const_bytes::<C, _, _, _>(&SnapshotTransmitter::<C, NF, SM>::stream_snapshot)
+        + watch_const_bytes::<C, ()>()
+        + sleep_const_bytes::<C>()
 }
 
 /// What a snapshot transmitter holds besides its task: the block of the channel that stops it,

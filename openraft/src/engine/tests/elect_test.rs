@@ -21,6 +21,7 @@ use crate::engine::testing::UTConfig;
 use crate::engine::testing::log_id;
 use crate::proposer::funding::candidate_state_bytes;
 use crate::proposer::funding::leader_state_bytes;
+use crate::proposer::funding::targets_bytes;
 use crate::proposer::funding::testing::Limit;
 use crate::raft::VoteRequest;
 use crate::raft::VoteResponse;
@@ -489,20 +490,47 @@ fn test_elect_charges_its_candidate_and_leader_until_they_are_freed() {
     eng.config.funding = limit.funding();
 
     eng.elect();
+    // The log id list's room for the Leader's first log id is reserved with the Candidate, held
+    // by the engine with the list's buffer, not by the Candidate.
+    let log_ids = eng.state.log_ids.kept_bytes();
+    assert!(eng.state.log_ids.spare() >= 1);
     assert_eq!(
-        candidate_state_bytes::<UTConfig>(&m12()) + leader_state_bytes::<UTConfig>(&m12()),
+        candidate_state_bytes::<UTConfig>(&m12()) + leader_state_bytes::<UTConfig>(&m12()) + log_ids,
         limit.held(),
         "the Candidate is charged with the Leader it may become"
     );
 
+    // The Candidate's own vote counts once it is saved, as the saved vote's IO completion does.
+    eng.candidate_mut().unwrap().grant_by(&1);
     eng.handle_vote_resp(2, VoteResponse::new(Vote::new(1, 1), Some(log_id(1, 1, 1)), true));
     assert!(eng.leader_ref().is_some());
     assert_eq!(
-        leader_state_bytes::<UTConfig>(&m12()),
+        log_ids,
+        eng.state.log_ids.kept_bytes(),
+        "the Leader's first log id fits the room reserved"
+    );
+    assert_eq!(
+        leader_state_bytes::<UTConfig>(&m12()) + log_ids,
         limit.held(),
         "the Leader keeps its part; the Candidate's is credited back as it is freed"
     );
 
     eng.leader = None;
+    let commands = eng.output.take_commands();
+    let targets: usize = commands
+        .iter()
+        .map(|command| match command {
+            Command::RebuildReplicationStreams { targets, .. } => targets.len(),
+            _ => 0,
+        })
+        .sum();
+    assert_eq!(
+        targets_bytes::<UTConfig>(targets) + log_ids,
+        limit.held(),
+        "the targets queued for the streams hold their part until they are freed, and the list its room"
+    );
+
+    drop(commands);
+    drop(eng);
     assert_eq!(0, limit.held());
 }

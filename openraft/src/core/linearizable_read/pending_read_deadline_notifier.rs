@@ -11,7 +11,6 @@ use crate::proposer::funding::Prepaid;
 use crate::proposer::funding::sleep_bytes;
 use crate::proposer::funding::task_bytes;
 use crate::proposer::funding::within;
-use crate::type_config::TypeConfigExt;
 use crate::type_config::alias::InstantOf;
 use crate::type_config::alias::JoinHandleOf;
 use crate::type_config::alias::MpscSenderOf;
@@ -115,6 +114,7 @@ mod tests {
     use super::*;
     use crate::async_runtime::MpscReceiver;
     use crate::engine::testing::UTConfig;
+    use crate::type_config::TypeConfigExt;
 
     type C = UTConfig;
 

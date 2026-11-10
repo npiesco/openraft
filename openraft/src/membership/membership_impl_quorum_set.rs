@@ -59,10 +59,8 @@ mod tests {
 
         // Joint config: must be a majority in every config.
         {
-            let m12345_678 = Membership::<u64, ()>::new_unchecked(
-                vec![btreeset! {1,2,3,4,5}, btreeset! {6,7,8}],
-                btreemap! {},
-            );
+            let m12345_678 =
+                Membership::<u64, ()>::new_unchecked(vec![btreeset! {1,2,3,4,5}, btreeset! {6,7,8}], btreemap! {});
 
             assert!(!m12345_678.is_quorum([0].iter()));
             assert!(!m12345_678.is_quorum([0, 1, 2].iter()));
@@ -77,10 +75,8 @@ mod tests {
 
     #[test]
     fn test_membership_ids() -> anyhow::Result<()> {
-        let m12345_678 = Membership::<u64, ()>::new_unchecked(
-            vec![btreeset! {1,2,3,4,5}, btreeset! {4,5,6,7,8}],
-            btreemap! {},
-        );
+        let m12345_678 =
+            Membership::<u64, ()>::new_unchecked(vec![btreeset! {1,2,3,4,5}, btreeset! {4,5,6,7,8}], btreemap! {});
 
         assert_eq!(btreeset! {1,2,3,4,5,6,7,8}, m12345_678.ids().collect());
 

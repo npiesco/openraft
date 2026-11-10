@@ -91,7 +91,7 @@ where
             debug_assert!(first_ent.index() == prev_log_id.next_index());
         }
 
-        let since = self.state.first_conflicting_index(&*entries);
+        let since = self.state.first_conflicting_index(&entries);
         // The leader of the log id the new entries follow, once the conflicting ones are deleted.
         let before = match since.checked_sub(1) {
             Some(i) => Some(entries[i].ref_log_id().committed_leader_id()),

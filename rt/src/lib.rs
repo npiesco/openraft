@@ -11,6 +11,7 @@
 //! - [`Mutex`] - Async mutex
 //! - [`Oneshot`], [`OneshotSender`] - One-shot channels
 //! - [`Funder`], [`Charge`] - Funding for what a node allocates for its owner
+//! - [`RuntimeBytes`], [`ConstBytes`] - What a runtime allocates, known when compiled
 //! - [`Watch`], [`WatchSender`], [`WatchReceiver`] - Watch channels
 //!
 //! ## Features
@@ -35,7 +36,9 @@ pub mod watch;
 pub use async_runtime::AsyncRuntime;
 pub use funding::Charge;
 pub use funding::Charged;
+pub use funding::ConstBytes;
 pub use funding::Funder;
+pub use funding::RuntimeBytes;
 pub use instant::Instant;
 pub use mpsc::Mpsc;
 pub use mpsc::MpscReceiver;

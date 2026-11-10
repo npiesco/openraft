@@ -19,7 +19,6 @@ use crate::type_config::alias::OneshotReceiverOf;
 use crate::type_config::async_runtime::Mpsc;
 use crate::type_config::async_runtime::MpscReceiver;
 use crate::type_config::async_runtime::MpscSender;
-use crate::type_config::util::TypeConfigExt;
 
 /// Result type for stream append operations.
 pub type StreamAppendResult<C> = Result<Option<LogIdOf<C>>, StreamAppendError<C>>;

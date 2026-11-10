@@ -9,6 +9,10 @@ use std::task::Poll;
 
 use pin_project_lite::pin_project;
 
+use crate::AsyncRuntime;
+use crate::OptionalSend;
+use crate::OptionalSync;
+
 /// What a Raft node charges, before it makes each, the allocations it makes for its owner: the
 /// channels its callers wait on and its leader's state. A charge refused allocates nothing and
 /// is answered with an error; a charge granted is credited back only once what it funded is
@@ -127,6 +131,39 @@ impl<F: Future> Future for Charged<F> {
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<F::Output> {
         self.project().future.poll(cx)
     }
+}
+
+/// A figure of bytes a type stands for, known when the program is compiled.
+pub trait ConstBytes {
+    /// The bytes.
+    const BYTES: usize;
+}
+
+/// What a runtime allocates for each thing a funded node makes, known when the program is
+/// compiled: the figures [`AsyncRuntime::spawn_bytes`], [`Watch::block_bytes`],
+/// [`Oneshot::block_bytes`] and [`AsyncRuntime::sleep_bytes`] tell while it runs, each the same
+/// as that whenever it is `Some`. With them, what a node is funded for its own tasks is derived
+/// in a `const` from exactly what they make, rather than bounded by a guess.
+///
+/// [`Watch::block_bytes`]: crate::watch::Watch::block_bytes
+/// [`Oneshot::block_bytes`]: crate::oneshot::Oneshot::block_bytes
+pub trait RuntimeBytes: AsyncRuntime {
+    /// What a task running `T` is charged ([`AsyncRuntime::spawn_bytes`]).
+    type Spawned<T>: ConstBytes
+    where
+        T: Future + OptionalSend + 'static,
+        T::Output: OptionalSend + 'static;
+
+    /// The block of a funded watch channel carrying `T`
+    /// ([`Watch::block_bytes`](crate::watch::Watch::block_bytes)).
+    type WatchBlock<T: OptionalSend + OptionalSync>: ConstBytes;
+
+    /// The block of a funded one-shot channel carrying `T`
+    /// ([`Oneshot::block_bytes`](crate::oneshot::Oneshot::block_bytes)).
+    type OneshotBlock<T: OptionalSend>: ConstBytes;
+
+    /// What one sleep allocates until it is dropped ([`AsyncRuntime::sleep_bytes`]).
+    const SLEEP_BYTES: usize;
 }
 
 const fn larger(a: usize, b: usize) -> usize {

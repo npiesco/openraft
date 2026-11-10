@@ -14,6 +14,7 @@ use crate::RaftNetworkFactory;
 use crate::RaftTypeConfig;
 use crate::async_runtime::Charge;
 use crate::async_runtime::Oneshot;
+use crate::async_runtime::RuntimeBytes;
 use crate::async_runtime::watch::Watch;
 use crate::async_runtime::watch::WatchSender;
 use crate::core::heartbeat::event::HeartbeatEvent;
@@ -25,9 +26,13 @@ use crate::network::NetStreamAppend;
 use crate::progress::stream_id::StreamId;
 use crate::proposer::funding::Funding;
 use crate::proposer::funding::TaskCharge;
+use crate::proposer::funding::oneshot_const_bytes;
 use crate::proposer::funding::sleep_bytes;
+use crate::proposer::funding::sleep_const_bytes;
 use crate::proposer::funding::spawned_bytes;
+use crate::proposer::funding::spawned_const_bytes;
 use crate::proposer::funding::tree_bytes;
+use crate::proposer::funding::watch_const_bytes;
 use crate::type_config::alias::CommittedVoteOf;
 use crate::type_config::alias::JoinHandleOf;
 use crate::type_config::alias::MpscSenderOf;
@@ -110,6 +115,36 @@ where
     T::Output: OptionalSend + 'static,
 {
     spawned_bytes::<C, T>()
+}
+
+/// [`heartbeat_worker_bytes`] known when the program is compiled, from what the runtime tells of
+/// its tasks, channels and sleeps when compiled ([`RuntimeBytes`]): the same sum of exactly what
+/// a worker makes, and the same figure whenever the runtime's is `Some`. A node sizes what it
+/// funds its workers with in a `const` with it, moving with the types the worker is made of.
+#[since(version = "0.10.0")]
+pub const fn heartbeat_worker_const_bytes<C, NF>() -> usize
+where
+    C: RaftTypeConfig,
+    C::AsyncRuntime: RuntimeBytes,
+    NF: RaftNetworkFactory<C>,
+{
+    worker_task_const_bytes::<C, NF::Network, _, _>(&worker_task::<C, NF::Network>)
+        + oneshot_const_bytes::<C, ()>()
+        + watch_const_bytes::<C, Option<HeartbeatEvent<C>>>()
+        + sleep_const_bytes::<C>()
+}
+
+/// [`worker_task_bytes`] known when the program is compiled.
+const fn worker_task_const_bytes<C, N, T, F>(_task: &F) -> usize
+where
+    C: RaftTypeConfig,
+    C::AsyncRuntime: RuntimeBytes,
+    N: NetStreamAppend<C>,
+    F: FnOnce(HeartbeatWorker<C, N>, OneshotReceiverOf<C, ()>, Span) -> T,
+    T: Future + OptionalSend + 'static,
+    T::Output: OptionalSend + 'static,
+{
+    spawned_const_bytes::<C, T>()
 }
 
 /// The blocks of the channels a heartbeat worker holds: the one that stops it and the one it is

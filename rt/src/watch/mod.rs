@@ -11,6 +11,10 @@ use crate::Charge;
 use crate::OptionalSend;
 use crate::OptionalSync;
 
+/// A funded watch channel's two handles, or the charge and initial value given back when it
+/// cannot be made.
+pub type ChargedChannel<S, R, T> = Result<(S, R), (Charge, T)>;
+
 /// A `Watch` is a pair of `WatchSender` and `WatchReceiver` that can be used to watch for changes
 /// to a value.
 /// A single-producer, multi-consumer channel that only retains the last sent value.
@@ -77,7 +81,7 @@ pub trait Watch: Sized {
     fn charged_channel<T: OptionalSend + OptionalSync>(
         charge: Charge,
         init: T,
-    ) -> Result<(Self::Sender<T>, Self::Receiver<T>), (Charge, T)> {
+    ) -> ChargedChannel<Self::Sender<T>, Self::Receiver<T>, T> {
         Err((charge, init))
     }
 }

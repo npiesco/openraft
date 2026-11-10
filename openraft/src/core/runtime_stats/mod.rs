@@ -16,6 +16,7 @@ mod unrecorded;
 pub mod log_stage;
 
 pub use self::display_mode::DisplayMode;
+#[cfg(feature = "runtime-stats")]
 pub use self::runtime_stats::RuntimeStats;
 // What the core records its statistics into: nothing, allocating nothing, unless the
 // `runtime-stats` feature can read them.

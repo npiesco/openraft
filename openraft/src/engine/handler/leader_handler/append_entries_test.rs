@@ -21,6 +21,7 @@ use crate::progress::entry::ProgressEntry;
 use crate::progress::inflight_id::InflightId;
 use crate::progress::stream_id::StreamId;
 use crate::proposer::funding::leader_state_bytes;
+use crate::proposer::funding::targets_bytes;
 use crate::proposer::funding::testing::Limit;
 use crate::raft_state::IOId;
 use crate::raft_state::LogStateReader;
@@ -346,7 +347,26 @@ fn test_leader_append_membership_keeps_its_rebuilt_progress_charge() -> anyhow::
     );
 
     eng.leader = None;
+    let commands = eng.output.take_commands();
+    assert_eq!(
+        targets_bytes::<UTConfig>(queued_targets(&commands)),
+        limit.held(),
+        "the targets queued to rebuild the streams hold the part split off for them until they are freed"
+    );
+
+    drop(commands);
     assert_eq!(0, limit.held());
 
     Ok(())
+}
+
+/// The targets the queued commands rebuild replication streams for.
+fn queued_targets(commands: &[Command<UTConfig>]) -> usize {
+    commands
+        .iter()
+        .map(|command| match command {
+            Command::RebuildReplicationStreams { targets, .. } => targets.len(),
+            _ => 0,
+        })
+        .sum()
 }

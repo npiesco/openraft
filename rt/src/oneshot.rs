@@ -7,6 +7,9 @@ use openraft_macros::since;
 use crate::Charge;
 use crate::OptionalSend;
 
+/// A funded channel's two handles, or the charge given back when it cannot be made.
+pub type ChargedChannel<S, R> = Result<(S, R), Charge>;
+
 /// A oneshot channel for sending a single value between asynchronous tasks.
 pub trait Oneshot {
     /// Type of a `oneshot` sender.
@@ -43,7 +46,7 @@ pub trait Oneshot {
     ///
     /// `charge` is given back, with nothing allocated, if it does not hold the block's bytes or
     /// the runtime cannot fund its channels, which by default it cannot.
-    fn charged_channel<T>(charge: Charge) -> Result<(Self::Sender<T>, Self::Receiver<T>), Charge>
+    fn charged_channel<T>(charge: Charge) -> ChargedChannel<Self::Sender<T>, Self::Receiver<T>>
     where T: OptionalSend {
         Err(charge)
     }

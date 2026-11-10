@@ -38,6 +38,7 @@ use stream_state::StreamState;
 use crate::OptionalSend;
 use crate::RaftNetworkFactory;
 use crate::RaftTypeConfig;
+use crate::async_runtime::RuntimeBytes;
 use crate::async_runtime::Select2;
 use crate::async_runtime::watch::Watch;
 use crate::async_runtime::watch::WatchReceiver;
@@ -54,8 +55,11 @@ use crate::network::RPCOption;
 use crate::progress::inflight_id::InflightId;
 use crate::proposer::funding::arc_block_bytes;
 use crate::proposer::funding::sleep_bytes;
+use crate::proposer::funding::sleep_const_bytes;
 use crate::proposer::funding::spawned_bytes;
+use crate::proposer::funding::spawned_const_bytes;
 use crate::proposer::funding::unfold_bytes;
+use crate::proposer::funding::watch_const_bytes;
 use crate::raft::AppendEntriesRequest;
 use crate::raft::StreamAppendError;
 use crate::raft::StreamAppendResult;
@@ -128,10 +132,45 @@ where
     let shared = arc_block_bytes::<SlotLock<StreamState<C, LS>>>() + BackoffState::block_bytes();
     let session = InflightAppendQueue::<C>::block_bytes()
         + arc_block_bytes::<SlotLock<Option<ReplicationClosed>>>()
-        + unfold_bytes::<StreamContext<C, LS>, _, _>(ReplicationCore::<C, NF, LS>::next_append_request)
-        + <NF::Network as NetStreamAppend<C>>::stream_append_bytes();
+        + unfold_bytes::<StreamContext<C, LS>, _, _>(&ReplicationCore::<C, NF, LS>::next_append_request)
+        + <NF::Network as NetStreamAppend<C>>::STREAM_APPEND_BYTES;
     let sleep = sleep_bytes::<C>()?;
     replicate.checked_add(signals)?.checked_add(shared)?.checked_add(session)?.checked_add(sleep)
+}
+
+/// [`replication_stream_bytes`] known when the program is compiled, from what the runtime tells
+/// of its tasks, channels and sleeps when compiled ([`RuntimeBytes`]): the same sum of exactly
+/// what a stream makes, and the same figure whenever the runtime's is `Some`. A node sizes what
+/// it funds its streams with in a `const` with it, moving with the types the stream is made of.
+#[since(version = "0.10.0")]
+pub const fn replication_stream_const_bytes<C, NF, LS>() -> usize
+where
+    C: RaftTypeConfig,
+    C::AsyncRuntime: RuntimeBytes,
+    NF: RaftNetworkFactory<C>,
+    LS: RaftLogStorage<C>,
+{
+    let task = instrumented_task_const_bytes::<C, _, _, _>(&ReplicationCore::<C, NF, LS>::main);
+    let replicate = watch_const_bytes::<C, Replicate<C>>();
+    let signals = 2 * watch_const_bytes::<C, ()>();
+    let shared = arc_block_bytes::<SlotLock<StreamState<C, LS>>>() + BackoffState::block_bytes();
+    let session = InflightAppendQueue::<C>::block_bytes()
+        + arc_block_bytes::<SlotLock<Option<ReplicationClosed>>>()
+        + unfold_bytes::<StreamContext<C, LS>, _, _>(&ReplicationCore::<C, NF, LS>::next_append_request)
+        + <NF::Network as NetStreamAppend<C>>::STREAM_APPEND_BYTES;
+    task + replicate + signals + shared + session + sleep_const_bytes::<C>()
+}
+
+/// [`instrumented_task_bytes`] known when the program is compiled.
+const fn instrumented_task_const_bytes<C, A, T, F>(_task: &F) -> usize
+where
+    C: RaftTypeConfig,
+    C::AsyncRuntime: RuntimeBytes,
+    F: FnOnce(A) -> T,
+    T: Future + OptionalSend + 'static,
+    T::Output: OptionalSend + 'static,
+{
+    spawned_const_bytes::<C, tracing::instrument::Instrumented<T>>()
 }
 
 /// The error rank that a stream session adds when the target accepted none of the entries it sent.

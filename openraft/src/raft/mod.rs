@@ -96,7 +96,6 @@ use crate::async_runtime::mpsc::MpscReceiver;
 use crate::async_runtime::mpsc::MpscSender;
 use crate::async_runtime::watch::Watch;
 use crate::async_runtime::watch::WatchReceiver;
-use crate::async_runtime::watch::WatchSender;
 use crate::base::BoxAsyncOnceMut;
 use crate::base::BoxFuture;
 use crate::base::BoxOnce;
@@ -696,7 +695,7 @@ where
         let runtime_config = prepaid.shared(RuntimeConfig::new(&config, enable_tick))?;
 
         let core_span = tracing::span!(
-            parent: tracing::Span::current(),
+            parent: Span::current(),
             Level::DEBUG,
             "RaftCore",
             id = display(&id),
@@ -988,8 +987,10 @@ where
         )?;
         let pending_read_deadline_notifier = PendingReadDeadlineNotifier::spawn(tx_notify.clone(), &mut prepaid)?;
 
-        // Spawn forwarder task to bridge Watch channel to notification channel
-        prepaid.spawn(io_completion_forwarder::<C>(rx_io_completed, tx_notify.downgrade()), 0)?;
+        // Spawn forwarder task to bridge Watch channel to notification channel. It runs until the IO
+        // watch closes, as the core ends; its handle, dropped, lets it run on, never joined.
+        let _forwarder_handle =
+            prepaid.spawn(io_completion_forwarder::<C>(rx_io_completed, tx_notify.downgrade()), 0)?;
 
         StepDownWatcher::<C>::spawn(rx_server_metrics, rx_metrics, tx_api.downgrade(), &config, &mut prepaid)?;
 

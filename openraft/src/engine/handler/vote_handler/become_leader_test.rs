@@ -18,6 +18,7 @@ use crate::progress::entry::ProgressEntry;
 use crate::progress::inflight_id::InflightId;
 use crate::progress::stream_id::StreamId;
 use crate::proposer::funding::leader_state_bytes;
+use crate::proposer::funding::targets_bytes;
 use crate::proposer::funding::testing::Limit;
 use crate::raft_state::IOId;
 use crate::replication::payload::Payload;
@@ -122,9 +123,28 @@ fn test_become_leader_holds_its_charge_until_it_is_freed() {
 
     eng.vote_handler().become_leader();
     assert!(eng.leader.is_some());
-    assert_eq!(leader_state_bytes::<UTConfig>(&m01()), limit.held());
+    // The log id list's room for the Leader's first log id, charged before the list grows, is
+    // held by the engine with the list's buffer, not by the Leader.
+    let log_ids = eng.state.log_ids.kept_bytes();
+    assert_eq!(leader_state_bytes::<UTConfig>(&m01()) + log_ids, limit.held());
 
     eng.leader = None;
+    let commands = eng.output.take_commands();
+    let targets: usize = commands
+        .iter()
+        .map(|command| match command {
+            Command::RebuildReplicationStreams { targets, .. } => targets.len(),
+            _ => 0,
+        })
+        .sum();
+    assert_eq!(
+        targets_bytes::<UTConfig>(targets) + log_ids,
+        limit.held(),
+        "the targets queued for the streams hold their part until they are freed, and the list its room"
+    );
+
+    drop(commands);
+    drop(eng);
     assert_eq!(0, limit.held());
 }
 

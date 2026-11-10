@@ -334,7 +334,9 @@ mod tests {
             &mut self,
             _range: RB,
         ) -> Result<crate::storage::LogEntries<EntryOf<UTConfig>>, std::io::Error>
-        where RB: std::ops::RangeBounds<u64> + Clone + std::fmt::Debug + crate::OptionalSend {
+        where
+            RB: std::ops::RangeBounds<u64> + Clone + std::fmt::Debug + crate::OptionalSend,
+        {
             self.calls.push("read_entries");
             Ok(self.entries.clone().into())
         }

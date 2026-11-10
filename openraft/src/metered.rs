@@ -10,9 +10,8 @@ thread_local! {
     static METERING: Cell<bool> = const { Cell::new(false) };
     /// Every byte requested while metering.
     static ALLOCATED: Cell<usize> = const { Cell::new(0) };
-    /// What was allocated less what was freed while metering, and its high-water.
+    /// What was allocated less what was freed while metering.
     static LIVE: Cell<isize> = const { Cell::new(0) };
-    static PEAK: Cell<isize> = const { Cell::new(0) };
 }
 
 /// What a metered call allocated on its thread.
@@ -20,8 +19,6 @@ thread_local! {
 pub(crate) struct Meter {
     /// Every byte it requested, whether or not it freed them.
     pub(crate) allocated: usize,
-    /// The most it held at once beyond what was live as it began.
-    pub(crate) peak: usize,
     /// What it still held as it ended beyond what was live as it began; what it freed of what
     /// was live before counts against it.
     pub(crate) kept: isize,
@@ -37,17 +34,12 @@ fn allocated(bytes: usize) {
 }
 
 fn grown(bytes: isize) {
-    let _ = LIVE.try_with(|live| {
-        let now = live.get().saturating_add(bytes);
-        live.set(now);
-        let _ = PEAK.try_with(|peak| peak.set(peak.get().max(now)));
-    });
+    let _ = LIVE.try_with(|live| live.set(live.get().saturating_add(bytes)));
 }
 
 fn begin() {
     let _ = ALLOCATED.try_with(|allocated| allocated.set(0));
     let _ = LIVE.try_with(|live| live.set(0));
-    let _ = PEAK.try_with(|peak| peak.set(0));
 }
 
 fn meter(on: bool) {
@@ -57,7 +49,6 @@ fn meter(on: bool) {
 fn read() -> Meter {
     Meter {
         allocated: ALLOCATED.try_with(Cell::get).unwrap_or(0),
-        peak: PEAK.try_with(Cell::get).unwrap_or(0).unsigned_abs(),
         kept: LIVE.try_with(Cell::get).unwrap_or(0),
     }
 }

@@ -73,14 +73,12 @@ where C: RaftTypeConfig
     /// The bytes [`stream_append`](Self::stream_append) allocates for one stream of the requests
     /// a replication stream sends, a `BoxStream<'static, AppendEntriesRequest<C>>`, freed with
     /// what it returns: charged with the replication stream before its task is spawned, and held
-    /// until the task is freed.
+    /// until the task is freed. A constant, so a node can derive its funding in a `const`.
     ///
     /// This default is for an implementation that allocates nothing per stream. One built on
-    /// [`stream_append_sequential`] returns [`stream_append_sequential_bytes`].
+    /// [`stream_append_sequential`] is [`stream_append_sequential_bytes`].
     #[since(version = "0.10.0")]
-    fn stream_append_bytes() -> usize {
-        0
-    }
+    const STREAM_APPEND_BYTES: usize = 0;
 }
 
 /// Default sequential implementation of stream_append.
@@ -108,13 +106,13 @@ where
 /// The bytes [`stream_append_sequential`] allocates for one stream of requests of type `S`: the
 /// box of its response stream and that of the future that returns it, both freed with them.
 #[since(version = "0.10.0")]
-pub fn stream_append_sequential_bytes<C, N, S>() -> usize
+pub const fn stream_append_sequential_bytes<C, N, S>() -> usize
 where
     C: RaftTypeConfig,
     N: NetAppend<C> + ?Sized,
     S: Stream<Item = AppendEntriesRequest<C>> + OptionalSend + Unpin + 'static,
 {
-    let stream = unfold_bytes::<Sequential<'static, N, S>, _, _>(next_sequential::<C, N, S>);
+    let stream = unfold_bytes::<Sequential<'static, N, S>, _, _>(&next_sequential::<C, N, S>);
     stream + size_of::<std::future::Ready<Result<BoxStream<'static, Answer<C>>, RPCError<C>>>>()
 }
 

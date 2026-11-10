@@ -29,8 +29,9 @@ where C: RaftTypeConfig
     /// The channel used for communicating with the replication task.
     pub(crate) replicate_tx: WatchSenderOf<C, Replicate<C>>,
 
-    /// Sender for the cancellation signal; dropping this stops replication.
-    pub(crate) cancel_tx: WatchSenderOf<C, ()>,
+    /// Sender for the cancellation signal, held only to be dropped: dropping it stops
+    /// replication, as the task's `cancel_rx` sees the channel closed.
+    _cancel_tx: WatchSenderOf<C, ()>,
 
     /// Sender for the backoff reset signal; sending on it ends the active backoff of replication.
     pub(crate) backoff_reset_tx: WatchSenderOf<C, ()>,
@@ -58,7 +59,7 @@ where C: RaftTypeConfig
             _join_handle: join_handle,
             replicate_tx,
             snapshot_transmit_handle: None,
-            cancel_tx,
+            _cancel_tx: cancel_tx,
             backoff_reset_tx,
         }
     }

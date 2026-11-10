@@ -9,6 +9,7 @@
 pub use openraft_rt::AsyncRuntime;
 pub use openraft_rt::Charge;
 pub use openraft_rt::Charged;
+pub use openraft_rt::ConstBytes;
 pub use openraft_rt::Funder;
 pub use openraft_rt::Instant;
 pub use openraft_rt::Mpsc;
@@ -19,6 +20,7 @@ pub use openraft_rt::Mutex;
 pub use openraft_rt::Oneshot;
 pub use openraft_rt::OneshotSender;
 pub use openraft_rt::RecvError;
+pub use openraft_rt::RuntimeBytes;
 pub use openraft_rt::Select2;
 pub use openraft_rt::Select3;
 pub use openraft_rt::Select4;

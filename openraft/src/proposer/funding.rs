@@ -39,9 +39,11 @@ use crate::RaftTypeConfig;
 use crate::async_runtime::AsyncRuntime;
 use crate::async_runtime::Charge;
 use crate::async_runtime::Charged;
+use crate::async_runtime::ConstBytes;
 use crate::async_runtime::Funder;
 use crate::async_runtime::Mpsc;
 use crate::async_runtime::Oneshot;
+use crate::async_runtime::RuntimeBytes;
 use crate::async_runtime::Select2;
 use crate::async_runtime::watch::Watch;
 use crate::engine::TargetProgress;
@@ -576,12 +578,6 @@ where
         })
     }
 
-    /// `bytes` of the charge split off for a part the task holds, to be held with that part
-    /// until it is freed: refused as [`Unfunded`] if the charge holds fewer; `None` unfunded.
-    pub(crate) fn split(&mut self, bytes: usize) -> Result<Option<Charge>, Unfunded> {
-        self.parts.split(bytes)
-    }
-
     /// A oneshot channel the task holds, as [`Prepaid::oneshot`] makes it.
     pub(crate) fn oneshot<U>(&mut self) -> Result<(OneshotSenderOf<C, U>, OneshotReceiverOf<C, U>), Unfunded>
     where U: OptionalSend {
@@ -631,9 +627,22 @@ where
     spawned_bytes::<C, T>()
 }
 
+/// [`task_bytes`] known when the program is compiled, from the runtime's [`RuntimeBytes`]: the
+/// same figure whenever that is `Some`.
+pub(crate) const fn task_const_bytes<C, A, T, F>(_task: &F) -> usize
+where
+    C: RaftTypeConfig,
+    C::AsyncRuntime: RuntimeBytes,
+    F: FnOnce(A) -> T,
+    T: Future + OptionalSend + 'static,
+    T::Output: OptionalSend + 'static,
+{
+    spawned_const_bytes::<C, T>()
+}
+
 /// The bytes the box of a stream `futures_util::stream::unfold(init, step)` makes allocates,
 /// its state of type `T`: the stream's type named by the function `step`.
-pub(crate) fn unfold_bytes<T, F, Fut>(_step: F) -> usize
+pub(crate) const fn unfold_bytes<T, F, Fut>(_step: &F) -> usize
 where
     F: FnMut(T) -> Fut,
     Fut: Future,
@@ -650,6 +659,49 @@ where
     T::Output: OptionalSend + 'static,
 {
     AsyncRuntimeOf::<C>::spawn_bytes::<Charged<T>>()
+}
+
+/// [`spawned_bytes`] known when the program is compiled, from the runtime's [`RuntimeBytes`]:
+/// the same figure whenever that is `Some`.
+pub(crate) const fn spawned_const_bytes<C, T>() -> usize
+where
+    C: RaftTypeConfig,
+    C::AsyncRuntime: RuntimeBytes,
+    T: Future + OptionalSend + 'static,
+    T::Output: OptionalSend + 'static,
+{
+    <<C::AsyncRuntime as RuntimeBytes>::Spawned<Charged<T>> as ConstBytes>::BYTES
+}
+
+/// The block of a funded watch channel carrying `T`, known when the program is compiled: the
+/// runtime's [`Watch::block_bytes`] whenever that is `Some`.
+pub(crate) const fn watch_const_bytes<C, T>() -> usize
+where
+    C: RaftTypeConfig,
+    C::AsyncRuntime: RuntimeBytes,
+    T: OptionalSend + OptionalSync,
+{
+    <<C::AsyncRuntime as RuntimeBytes>::WatchBlock<T> as ConstBytes>::BYTES
+}
+
+/// The block of a funded one-shot channel carrying `T`, known when the program is compiled: the
+/// runtime's [`Oneshot::block_bytes`] whenever that is `Some`.
+pub(crate) const fn oneshot_const_bytes<C, T>() -> usize
+where
+    C: RaftTypeConfig,
+    C::AsyncRuntime: RuntimeBytes,
+    T: OptionalSend,
+{
+    <<C::AsyncRuntime as RuntimeBytes>::OneshotBlock<T> as ConstBytes>::BYTES
+}
+
+/// [`sleep_bytes`] known when the program is compiled: the same figure whenever that is `Some`.
+pub(crate) const fn sleep_const_bytes<C>() -> usize
+where
+    C: RaftTypeConfig,
+    C::AsyncRuntime: RuntimeBytes,
+{
+    <C::AsyncRuntime as RuntimeBytes>::SLEEP_BYTES
 }
 
 /// What one sleep a funded task makes allocates until it is dropped, its timer's registration

@@ -15,6 +15,9 @@ use crate::Charge;
 use crate::OptionalSend;
 use crate::OptionalSync;
 
+/// A funded channel's two handles, or the charge given back when it cannot be made.
+pub type ChargedChannel<S, R> = Result<(S, R), Charge>;
+
 /// Multi-producer, single-consumer channel.
 #[since(version = "0.10.0", change = "remove the `OptionalSend` requirement")]
 pub trait Mpsc: Sized {
@@ -50,7 +53,7 @@ pub trait Mpsc: Sized {
     fn charged_channel<T: OptionalSend>(
         charge: Charge,
         _buffer: usize,
-    ) -> Result<(Self::Sender<T>, Self::Receiver<T>), Charge> {
+    ) -> ChargedChannel<Self::Sender<T>, Self::Receiver<T>> {
         Err(charge)
     }
 }

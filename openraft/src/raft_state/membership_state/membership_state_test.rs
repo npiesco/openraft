@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use maplit::btreemap;
 use maplit::btreeset;
 
