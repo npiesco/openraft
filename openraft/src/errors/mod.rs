@@ -190,6 +190,7 @@ where
 }
 
 /// The set of errors which may take place when initializing a pristine Raft node.
+#[since(version = "0.10.0", change = "added `MembershipRefused`")]
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, derive_more::TryInto)]
 #[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize), serde(bound = ""))]
 pub enum InitializeError<C>
