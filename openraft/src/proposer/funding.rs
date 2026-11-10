@@ -379,6 +379,16 @@ where C: RaftTypeConfig
         }
     }
 
+    /// `bytes` more charged to the funder the charge was taken from, for a part whose size is
+    /// known only once the parts before it are made, to be held with that part until it is freed:
+    /// refused if the funder refuses them; `None` uncharged.
+    pub(crate) fn more(&self, bytes: usize) -> Result<Option<Charge>, R> {
+        match &self.charge {
+            Some((charge, refuse)) => charge.take_more(bytes).map(Some).ok_or_else(|| refuse(Unfunded)),
+            None => Ok(None),
+        }
+    }
+
     /// A oneshot channel, its block funded by its share of the charge, held until both halves are
     /// dropped and the block is freed: refused, nothing made, if the charge holds too few.
     pub(crate) fn oneshot<U>(&mut self) -> Result<(OneshotSenderOf<C, U>, OneshotReceiverOf<C, U>), R>
@@ -894,6 +904,7 @@ mod tests {
     use super::Shared;
     use super::testing::Limit;
     use super::within;
+    use crate::async_runtime::Charge;
     use crate::engine::testing::UTConfig;
     use crate::errors::Unfunded;
     use crate::metered::metered;
@@ -1011,6 +1022,30 @@ mod tests {
 
         let unfunded: Prepaid<C> = Prepaid::unfunded();
         assert_eq!(Ok(8), unfunded.sleeping(8));
+    }
+
+    /// A part sized only once the parts before it are made, as the log id list recovered from
+    /// storage is, is charged to the funder the start was charged to, held until it is dropped;
+    /// refused, nothing more is charged. A node without a funder charges nothing.
+    #[test]
+    fn test_more_is_charged_to_the_start_funder_or_refused() {
+        let limit = Limit::new(100);
+        let prepaid: Prepaid<C> = Prepaid::new(limit.funding().charge(64).unwrap(), identity);
+
+        let kept = prepaid.more(24).unwrap();
+        assert_eq!(Some(24), kept.as_ref().map(Charge::bytes));
+        assert_eq!(88, limit.held());
+
+        assert_eq!(Err(Unfunded), prepaid.more(24).map(|_| ()));
+        assert_eq!(88, limit.held(), "refused, nothing more is charged");
+
+        drop(kept);
+        assert_eq!(64, limit.held());
+        drop(prepaid);
+        assert_eq!(0, limit.held());
+
+        let unfunded: Prepaid<C> = Prepaid::unfunded();
+        assert!(matches!(unfunded.more(24), Ok(None)));
     }
 
     /// Tasks that sleep, charged together, are refused, charging nothing, if the runtime cannot

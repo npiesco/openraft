@@ -22,6 +22,11 @@ impl PartialEq for SharedIdGenerator {
 impl Eq for SharedIdGenerator {}
 
 impl SharedIdGenerator {
+    /// What the counter its clones share allocates.
+    pub(crate) const fn block_bytes() -> usize {
+        crate::proposer::funding::arc_block_bytes::<AtomicU64>()
+    }
+
     pub(crate) fn new() -> Self {
         Self {
             next_id: Arc::new(AtomicU64::new(1)),

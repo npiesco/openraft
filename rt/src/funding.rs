@@ -53,6 +53,12 @@ impl Charge {
         }
     }
 
+    /// `bytes` more charged to the funder this charge was taken from, as a charge of their own,
+    /// if it grants them. Another handle on the funder is taken, which allocates nothing.
+    pub fn take_more(&self, bytes: usize) -> Option<Charge> {
+        Charge::take(&self.funder, bytes)
+    }
+
     /// The bytes it holds charged.
     pub fn bytes(&self) -> usize {
         self.bytes

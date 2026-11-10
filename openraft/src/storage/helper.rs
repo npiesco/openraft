@@ -346,26 +346,21 @@ where
     pub async fn get_membership(&mut self) -> Result<MembershipStateOf<C>, StorageError<C>> {
         let (last_applied, sm_mem) = self.state_machine.applied_state().await.sto_read_sm()?;
 
-        let log_mem = self.last_membership_in_log(last_applied.next_index()).await?;
+        let [older, last] = self.last_memberships_in_log(last_applied.next_index()).await?;
         tracing::debug!(
-            "{}: membership_in_sm={:?}, membership_in_log={:?}",
+            "{}: membership_in_sm={:?}, membership_in_log={:?}, {:?}",
             func_name!(),
             sm_mem,
-            log_mem
+            older,
+            last
         );
 
-        // There 2 membership configs in logs.
-        if log_mem.len() == 2 {
-            return Ok(MembershipStateOf::<C>::new(log_mem[0].clone(), log_mem[1].clone()));
-        }
-
-        let effective = if log_mem.is_empty() {
-            sm_mem.clone()
-        } else {
-            log_mem[0].clone()
+        let res = match (older, last) {
+            // There 2 membership configs in logs.
+            (Some(older), Some(last)) => MembershipStateOf::<C>::new(older, last),
+            (None, Some(last)) => MembershipStateOf::<C>::new(sm_mem, last),
+            (_, None) => MembershipStateOf::<C>::new(sm_mem.clone(), sm_mem),
         };
-
-        let res = MembershipStateOf::<C>::new(sm_mem, effective);
 
         Ok(res)
     }
@@ -375,11 +370,22 @@ where
     /// This method returns at most membership logs with the greatest log index which is
     /// `>=since_index`. If no such membership log is found, it returns `None`, e.g., when logs
     /// are cleaned after being applied.
-    #[tracing::instrument(level = "trace", skip_all)]
     pub async fn last_membership_in_log(
         &mut self,
         since_index: u64,
     ) -> Result<Vec<StoredMembershipOf<C>>, StorageError<C>> {
+        let [older, last] = self.last_memberships_in_log(since_index).await?;
+        Ok(older.into_iter().chain(last).collect())
+    }
+
+    /// The last 2 membership configs found in the log at `since_index` or later, as
+    /// [`last_membership_in_log`](Self::last_membership_in_log) finds them, the older first,
+    /// held in place: finding them allocates nothing beyond what the log reader reads.
+    #[tracing::instrument(level = "trace", skip_all)]
+    pub(crate) async fn last_memberships_in_log(
+        &mut self,
+        since_index: u64,
+    ) -> Result<[Option<StoredMembershipOf<C>>; 2], StorageError<C>> {
         let st = self.log_store.get_log_state().await.sto_read_logs()?;
 
         let mut end = st.last_log_id.next_index();
@@ -389,7 +395,7 @@ where
         let start = std::cmp::max(st.last_purged_log_id.next_index(), since_index);
         let step = 64;
 
-        let mut res = vec![];
+        let mut last = None;
         let mut log_reader = self.log_store.get_log_reader().await;
 
         while start < end {
@@ -399,17 +405,17 @@ where
             for ent in entries.iter().rev() {
                 if let Some(mem) = ent.get_membership() {
                     let em = StoredMembershipOf::<C>::new(Some(ent.log_id()), mem);
-                    res.insert(0, em);
-                    if res.len() == 2 {
-                        return Ok(res);
+                    if last.is_some() {
+                        return Ok([Some(em), last]);
                     }
+                    last = Some(em);
                 }
             }
 
             end = end.saturating_sub(step);
         }
 
-        Ok(res)
+        Ok([None, last])
     }
 
     // TODO: store purged: Option<LogId> separately.

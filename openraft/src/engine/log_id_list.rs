@@ -202,6 +202,12 @@ where CLID: RaftCommittedLeaderId
         }
     }
 
+    /// What its buffer of leaders' last log ids allocates: what a list read from storage is
+    /// charged as the node takes it.
+    pub(crate) fn kept_bytes(&self) -> usize {
+        self.key_log_ids.capacity().saturating_mul(size_of::<LogId<CLID>>())
+    }
+
     /// Room for `keys` more leaders' last log ids, the whole capacity it grows to charged to
     /// `funding` before it grows and held in `held`, as [`Funding::reserve`] does: refused as
     /// [`Unfunded`], nothing is allocated or charged.

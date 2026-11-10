@@ -101,6 +101,7 @@ use crate::base::BoxAsyncOnceMut;
 use crate::base::BoxFuture;
 use crate::base::BoxOnce;
 use crate::base::BoxStream;
+use crate::base::shared_id_generator::SharedIdGenerator;
 use crate::config::Config;
 use crate::config::RuntimeConfig;
 use crate::core::ClientResponderQueue;
@@ -576,6 +577,14 @@ where
     /// [`Unfunded`] (or, by [`run`](Self::run), logged), the node stopped and the tasks spawned
     /// before the refused one ending as what they wait on is dropped, if the runtime cannot make
     /// one.
+    ///
+    /// The state recovered from storage is charged to `funder` too: the counter its progress ids
+    /// are drawn from with the rest, before it is made, and the log id list read for it, whose
+    /// length the storage tells only as it reads it, as the node takes it, refused as
+    /// [`Unfunded`] with the node not built. The memberships it keeps are accounted for by their
+    /// owner, as [`MembershipOwner`](crate::MembershipOwner) tells, and what the storage reads to
+    /// recover it is the storage's own. With the `runtime-stats` feature, its recorders, a
+    /// diagnostic, are not charged.
     #[since(version = "0.10.0")]
     #[tracing::instrument(level="debug", skip_all, fields(cluster=%config.cluster_name))]
     pub async fn build_funded<LS, N>(
@@ -631,6 +640,8 @@ where
             WatchOf::<C>::block_bytes::<bool>()?.checked_mul(2)?,
             IoProgressWatcher::<C>::channel_bytes()?,
             Shared::<RuntimeConfig<C>>::block_bytes(),
+            // The progress id generator the recovered state holds.
+            SharedIdGenerator::block_bytes(),
             Shared::<RaftInner<C>>::block_bytes(),
             size_of::<CoreStart<C, N, LS, SM>>(),
             worker::Worker::<C, SM, LS::LogReader>::spawn_bytes()?,
@@ -699,7 +710,12 @@ where
             helper.get_initial_state().await.map_err(|err| R::from(Fatal::from(err)))?
         };
 
-        let engine = Engine::<C, SM>::new(state, eng_config);
+        // What the storage reads to recover the state is its own, freed as it is read. Of what
+        // the node keeps, the log id list, its length known only once read, is charged as it is
+        // taken: refused, the node is not built and the state is dropped.
+        let log_ids_funding = prepaid.more(state.log_ids.kept_bytes())?;
+        let mut engine = Engine::<C, SM>::new(state, eng_config);
+        engine.log_ids_funding = log_ids_funding;
 
         let sm_span = tracing::span!(parent: &core_span, Level::DEBUG, "sm_worker");
 
