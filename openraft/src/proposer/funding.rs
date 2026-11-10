@@ -843,10 +843,27 @@ pub(crate) mod testing {
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
+    use std::convert::identity;
+    use std::future::Future;
+    use std::future::pending;
+    use std::future::ready;
+    use std::task::Context;
+    use std::task::Waker;
+    use std::time::Duration;
 
+    use super::Elapsed;
+    use super::Funding;
     use super::KEPT_SLOTS;
+    use super::Prepaid;
+    use super::Shared;
     use super::testing::Limit;
+    use super::within;
+    use crate::engine::testing::UTConfig;
+    use crate::errors::Unfunded;
     use crate::metered::metered;
+    use crate::type_config::TypeConfigExt;
+
+    type C = UTConfig;
 
     /// A queue drained to a quarter of its slots or fewer is shrunk, and its charge drops to
     /// what the smaller buffer holds; it is kept at [`KEPT_SLOTS`] at least.
@@ -903,5 +920,89 @@ mod tests {
         assert_eq!(0, meter.allocated, "refused, nothing allocated");
         assert_eq!(capacity, queue.capacity());
         assert_eq!(charged, limit.held());
+    }
+
+    /// A funded block held across a stall, by a future pending forever, is charged as long as
+    /// it is live; the stall cannot wedge the pool: an admission beyond what is left is refused at
+    /// once, not waited for, and once the stalled future is dropped and the block freed, the
+    /// charge is back and the same admission is granted.
+    #[test]
+    fn test_custody_stall_holds_its_charge_and_cannot_wedge_the_pool() {
+        let block = Shared::<[u8; 64]>::block_bytes();
+        let limit = Limit::new(block);
+        let funding = limit.funding();
+
+        let mut prepaid: Prepaid<C> = Prepaid::new(funding.charge(block).unwrap(), identity);
+        let (shared, meter) = metered(|| prepaid.shared([7u8; 64]).unwrap());
+        drop(prepaid);
+        assert_eq!(
+            block,
+            meter.kept.unsigned_abs(),
+            "the block is charged what it allocates"
+        );
+        assert_eq!(block, limit.held());
+
+        let mut stalled = Box::pin(async move {
+            let _custody = shared;
+            pending::<()>().await
+        });
+        let mut cx = Context::from_waker(Waker::noop());
+        assert!(stalled.as_mut().poll(&mut cx).is_pending());
+        assert!(stalled.as_mut().poll(&mut cx).is_pending());
+        assert_eq!(block, limit.held(), "charged while the stall holds it");
+
+        let (refused, meter) = metered(|| funding.charge(1));
+        assert_eq!(Some(Unfunded), refused.err(), "refused at once, not waited for");
+        assert_eq!(0, meter.allocated);
+        assert_eq!(block, limit.held());
+
+        drop(stalled);
+        assert_eq!(0, limit.held(), "freed, its charge is back");
+        let granted = funding.charge(block).unwrap();
+        assert!(granted.is_some());
+        assert_eq!(block, limit.held());
+    }
+
+    /// A funded task that sleeps is refused before anything is made for it if the runtime cannot
+    /// fund a sleep, as the test runtime cannot; an unfunded one holds just what it holds.
+    #[test]
+    fn test_sleeping_is_refused_if_the_runtime_cannot_fund_a_sleep() {
+        let limit = Limit::new(usize::MAX);
+        let prepaid: Prepaid<C> = Prepaid::new(limit.funding().charge(64).unwrap(), identity);
+        assert_eq!(Err(Unfunded), prepaid.sleeping(8));
+        drop(prepaid);
+        assert_eq!(0, limit.held());
+
+        let unfunded: Prepaid<C> = Prepaid::unfunded();
+        assert_eq!(Ok(8), unfunded.sleeping(8));
+    }
+
+    /// Tasks that sleep, charged together, are refused, charging nothing, if the runtime cannot
+    /// fund a task or a sleep; uncharged on a node without a funder.
+    #[test]
+    fn test_sleeping_tasks_are_charged_together_or_refused() {
+        let limit = Limit::new(usize::MAX);
+        let refused = limit.funding().sleeping_tasks::<C, std::future::Ready<()>>(3);
+        assert!(matches!(refused, Err(Unfunded)));
+        assert_eq!(0, limit.held());
+
+        let unfunded = Funding::default().sleeping_tasks::<C, std::future::Ready<()>>(3);
+        assert!(matches!(unfunded, Ok(None)));
+    }
+
+    /// [`within`] yields the future's output if it completes first, and [`Elapsed`] once the
+    /// deadline passes before it does.
+    #[test]
+    fn test_within() {
+        C::run(async {
+            let done = within::<C, _>(C::now() + Duration::from_secs(5), ready(3)).await;
+            assert_eq!(Ok(3), done);
+
+            let elapsed = within::<C, _>(C::now() + Duration::from_millis(10), pending::<()>()).await;
+            assert_eq!(Err(Elapsed), elapsed);
+
+            let first = within::<C, _>(C::now(), ready(4)).await;
+            assert_eq!(Ok(4), first, "a ready future is polled before the deadline");
+        });
     }
 }
