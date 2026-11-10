@@ -35,7 +35,6 @@ mod tests {
     use std::task::Context;
     use std::task::Waker;
 
-    use super::DisplayFuncName;
     use crate::metered::metered;
 
     /// A fixed buffer that counts what it is written, never growing.
@@ -73,8 +72,10 @@ mod tests {
             fixed.as_str()
         );
 
+        // Named by its path, not imported: `func_name!` names it by `$crate::display_ext`, so an
+        // import here would make that path a redundant qualification.
         let raw = "a::b::{{closure}}::c::{{closure}}::f";
-        assert_eq!("a::b::c", DisplayFuncName::of_item(raw).to_string());
+        assert_eq!("a::b::c", super::DisplayFuncName::of_item(raw).to_string());
     }
 
     /// With tracing disabled, as it is with no subscriber, a span, an instrumented future and an
