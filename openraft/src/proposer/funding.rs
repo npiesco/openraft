@@ -73,6 +73,25 @@ impl Funding {
         self.0.is_some()
     }
 
+    /// `count` tasks running `T`, each holding the one sleep it makes, charged before any of
+    /// them is made, to be spawned from a [`Prepaid`] of the charge, each by
+    /// [`Prepaid::sleeping`] and [`Prepaid::spawn`]: refused, charging nothing, if the funder
+    /// refuses them or the runtime cannot fund a task or a sleep. A node without a funder charges
+    /// nothing: `Ok(None)`.
+    pub(crate) fn sleeping_tasks<C, T>(&self, count: usize) -> Result<Option<Charge>, Unfunded>
+    where
+        C: RaftTypeConfig,
+        T: Future + OptionalSend + 'static,
+        T::Output: OptionalSend + 'static,
+    {
+        if !self.is_funded() {
+            return Ok(None);
+        }
+        let task = spawned_bytes::<C, T>().ok_or(Unfunded)?;
+        let each = task.checked_add(sleep_bytes::<C>().ok_or(Unfunded)?).ok_or(Unfunded)?;
+        self.charge(each.checked_mul(count).ok_or(Unfunded)?)
+    }
+
     /// A oneshot channel carrying `T`, its block charged before it is made and held until both
     /// halves are dropped and the block is freed: refused as [`Unfunded`], nothing allocated, as
     /// [`OneshotCharge::take`] is.

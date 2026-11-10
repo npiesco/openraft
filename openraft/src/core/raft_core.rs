@@ -1781,31 +1781,48 @@ where
     ///
     /// `make_rpc` is handed a fresh client for one target and the shared [`RPCOption`], and returns
     /// the future that talks to it. Nothing is joined, so each future has to report its own
-    /// outcome; `ttl` is the timeout the caller is expected to enforce inside that future.
+    /// outcome; `ttl` is the timeout the caller is expected to enforce inside that future, by
+    /// [`within`], on the one sleep each task is charged.
+    ///
+    /// On a funded node every task, and the sleep it holds, is charged before any of them is made:
+    /// refused, no request is sent, nothing allocated for any. The voters are read where the
+    /// membership holds them, not collected.
     async fn broadcast_to_voters<F, Fut>(&mut self, ttl: Duration, make_rpc: F)
     where
         F: Fn(C::NodeId, NF::Network, RPCOption) -> Fut,
         Fut: Future<Output = ()> + OptionalSend + 'static,
     {
-        let voter_ids = self.engine.state.membership_state.effective().voter_ids();
+        let membership = self.engine.state.membership_state.effective().membership();
+        let others = membership.voters().filter(|(id, _)| **id != self.id).count();
 
-        for target in voter_ids {
-            if target == self.id {
+        let charge = match self.engine.config.funding.sleeping_tasks::<C, Fut>(others) {
+            Ok(charge) => charge,
+            Err(Unfunded) => {
+                tracing::warn!("id={}: no broadcast to {} voters: it is unfunded", self.id, others);
+                return;
+            }
+        };
+        let mut prepaid = Prepaid::<C>::new(charge, std::convert::identity);
+
+        for (target, node) in membership.voters() {
+            if *target == self.id {
                 continue;
             }
 
-            // Safe unwrap(): target must be in membership
-            let target_node = self.engine.state.membership_state.effective().get_node(&target).unwrap().clone();
-            let client = {
-                let mut factory = self.network_factory.lock().await;
-                factory.new_client(target.clone(), &target_node).await
-            };
+            let client = self.network_factory.new_client(target.clone(), node).await;
 
-            let fut = make_rpc(target, client, RPCOption::new(ttl));
+            let fut = make_rpc(target.clone(), client, RPCOption::new(ttl));
 
-            // False positive lint warning(`non-binding `let` on a future`): https://github.com/rust-lang/rust-clippy/issues/9932
-            #[allow(clippy::let_underscore_future)]
-            let _ = C::spawn(fut);
+            // From its share of the charge taken for all of them: refused only if the runtime
+            // cannot make the task.
+            let spawned = prepaid.sleeping(0).and_then(|held| prepaid.spawn(fut, held));
+            if let Err(Unfunded) = spawned {
+                tracing::warn!(
+                    "id={} target={}: no broadcast request: its task is unfunded",
+                    self.id,
+                    target
+                );
+            }
         }
     }
 
