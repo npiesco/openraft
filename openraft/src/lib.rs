@@ -136,6 +136,7 @@ pub use crate::log_id::LogIdOptionExt;
 pub use crate::log_id::LogIndexOptionExt;
 pub use crate::membership::Membership;
 pub use crate::membership::MembershipOwner;
+pub use crate::membership::OwnerRefused;
 pub use crate::membership::StoredMembership;
 pub use crate::metrics::RaftMetrics;
 pub use crate::network::RPCTypes;

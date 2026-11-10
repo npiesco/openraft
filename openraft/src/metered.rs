@@ -1,5 +1,6 @@
 //! The unit tests' allocator: the system's, metering what this thread allocates while a test
-//! runs a call under [`metered`]. Other threads are not metered.
+//! runs a call under [`metered`], and refusing every allocation this thread asks for while it
+//! runs a call under [`refusing`]. Other threads are neither metered nor refused.
 
 use std::alloc::GlobalAlloc;
 use std::alloc::Layout;
@@ -12,6 +13,9 @@ thread_local! {
     static ALLOCATED: Cell<usize> = const { Cell::new(0) };
     /// What was allocated less what was freed while metering.
     static LIVE: Cell<isize> = const { Cell::new(0) };
+    static REFUSING: Cell<bool> = const { Cell::new(false) };
+    /// Every allocation refused while refusing.
+    static REFUSED: Cell<usize> = const { Cell::new(0) };
 }
 
 /// What a metered call allocated on its thread.
@@ -62,15 +66,37 @@ pub(crate) fn metered<T>(run: impl FnOnce() -> T) -> (T, Meter) {
     (out, read())
 }
 
+/// `run` with every allocation it asks for on this thread refused, with how many it asked for.
+pub(crate) fn refusing<T>(run: impl FnOnce() -> T) -> (T, usize) {
+    let _ = REFUSED.try_with(|refused| refused.set(0));
+    let _ = REFUSING.try_with(|refusing| refusing.set(true));
+    let out = run();
+    let _ = REFUSING.try_with(|refusing| refusing.set(false));
+    (out, REFUSED.try_with(Cell::get).unwrap_or(0))
+}
+
+/// Whether to refuse this allocation, counting it if so.
+fn refused() -> bool {
+    let refuse = REFUSING.try_with(Cell::get).unwrap_or(false);
+    if refuse {
+        let _ = REFUSED.try_with(|refused| refused.set(refused.get().saturating_add(1)));
+    }
+    refuse
+}
+
 struct Metered;
 
 #[global_allocator]
 static ALLOCATOR: Metered = Metered;
 
-// SAFETY: every call is forwarded to System unchanged; the metering touches only constant
-// thread-locals without destructors, so it allocates nothing.
+// SAFETY: every call is forwarded to System unchanged, or refused with a null pointer, which
+// the contract allows for any allocation; the metering and refusing touch only constant
+// thread-locals without destructors, so they allocate nothing.
 unsafe impl GlobalAlloc for Metered {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        if refused() {
+            return std::ptr::null_mut();
+        }
         let ptr = unsafe { System.alloc(layout) };
         if !ptr.is_null() && metering() {
             allocated(layout.size());
@@ -79,6 +105,9 @@ unsafe impl GlobalAlloc for Metered {
     }
 
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        if refused() {
+            return std::ptr::null_mut();
+        }
         let ptr = unsafe { System.alloc_zeroed(layout) };
         if !ptr.is_null() && metering() {
             allocated(layout.size());
@@ -87,6 +116,9 @@ unsafe impl GlobalAlloc for Metered {
     }
 
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, size: usize) -> *mut u8 {
+        if refused() {
+            return std::ptr::null_mut();
+        }
         let grown_ptr = unsafe { System.realloc(ptr, layout, size) };
         if !grown_ptr.is_null() && metering() {
             allocated(size);

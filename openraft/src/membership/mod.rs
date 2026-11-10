@@ -7,6 +7,7 @@
 //! - [`Membership`] - Cluster membership configuration (voters and learners)
 //! - [`StoredMembership`] - Membership state stored in state machine
 //! - [`MembershipOwner`] - What accounts for the memory of a membership storage returns
+//! - [`OwnerRefused`] - A membership and owner handed back when the allocator refuses their block
 //! - [`IntoNodes`] - Trait for converting node sets with metadata
 //!
 //! ## Overview
@@ -35,5 +36,6 @@ mod stored_membership_test;
 
 pub use into_nodes::IntoNodes;
 pub use membership::Membership;
+pub use membership::OwnerRefused;
 pub use membership_owner::MembershipOwner;
 pub use stored_membership::StoredMembership;

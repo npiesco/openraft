@@ -1,8 +1,12 @@
 use core::fmt;
+use std::alloc::Layout;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
-use std::mem::ManuallyDrop;
-use std::sync::Arc;
+use std::marker::PhantomData;
+use std::ptr::NonNull;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
+use std::sync::atomic::fence;
 
 use openraft_macros::since;
 
@@ -15,7 +19,6 @@ use crate::membership::IntoNodes;
 use crate::membership::MembershipOwner;
 use crate::node::Node;
 use crate::node::NodeId;
-use crate::proposer::funding::arc_block_bytes;
 use crate::quorum::QuorumBridge;
 use crate::quorum::QuorumIntersection;
 
@@ -77,22 +80,89 @@ where
 }
 
 /// One handle on members shared with their owner: a clone is another handle on the same block.
+///
+/// The block is counted as an `Arc`'s is, but allocated fallibly ([`Owned::try_new`]): the
+/// allocator refusing it hands the members and their owner back rather than ending the process.
 struct Owned<NID, N>
 where
     NID: NodeId,
     N: Node,
 {
-    shared: ManuallyDrop<Arc<OwnedMembers<NID, N>>>,
+    block: NonNull<OwnedMembers<NID, N>>,
+    _owns: PhantomData<OwnedMembers<NID, N>>,
 }
 
-/// The block an owned membership's handles share.
+/// The block an owned membership's handles share: how many handles there are, the members and
+/// their owner.
 struct OwnedMembers<NID, N>
 where
     NID: NodeId,
     N: Node,
 {
+    handles: AtomicUsize,
     members: Members<NID, N>,
     owner: Box<dyn MembershipOwner>,
+}
+
+// SAFETY: a handle reads the block's members and owner only by shared reference, and the last
+// handle, on whichever thread drops it, takes them out once every other handle is gone (the
+// count's release/acquire orders their reads before it): as for an `Arc`, it is `Send` and
+// `Sync` exactly when what it shares is both. The owner is always both.
+unsafe impl<NID, N> Send for Owned<NID, N>
+where
+    NID: NodeId,
+    N: Node,
+    Members<NID, N>: Send + Sync,
+{
+}
+
+// SAFETY: as for `Send` above.
+unsafe impl<NID, N> Sync for Owned<NID, N>
+where
+    NID: NodeId,
+    N: Node,
+    Members<NID, N>: Send + Sync,
+{
+}
+
+impl<NID, N> Owned<NID, N>
+where
+    NID: NodeId,
+    N: Node,
+{
+    /// The one handle on a block `members` and `owner` move into, or both handed back, nothing
+    /// allocated, if the allocator refuses the block.
+    fn try_new(
+        members: Members<NID, N>,
+        owner: Box<dyn MembershipOwner>,
+    ) -> Result<Self, (Members<NID, N>, Box<dyn MembershipOwner>)> {
+        let layout = Layout::new::<OwnedMembers<NID, N>>();
+        // SAFETY: the layout is not zero-sized: it holds the handle count.
+        let block = unsafe { std::alloc::alloc(layout) }.cast::<OwnedMembers<NID, N>>();
+        let Some(block) = NonNull::new(block) else {
+            return Err((members, owner));
+        };
+        // SAFETY: `block` was just allocated for this layout and is written once, before any
+        // handle reads it.
+        unsafe {
+            block.as_ptr().write(OwnedMembers {
+                handles: AtomicUsize::new(1),
+                members,
+                owner,
+            })
+        };
+        Ok(Owned {
+            block,
+            _owns: PhantomData,
+        })
+    }
+
+    /// What the handles share, borrowed for no longer than this handle.
+    fn shared(&self) -> &OwnedMembers<NID, N> {
+        // SAFETY: the block lives, initialized, while any handle does, and is only read through
+        // shared references until the last handle takes it apart.
+        unsafe { self.block.as_ref() }
+    }
 }
 
 impl<NID, N> Clone for Owned<NID, N>
@@ -101,8 +171,15 @@ where
     N: Node,
 {
     fn clone(&self) -> Self {
+        // As an `Arc` does: a new handle is made from an existing one, so the count needs no
+        // ordering, and is bounded so that it cannot wrap around to the last handle's.
+        let handles = self.shared().handles.fetch_add(1, Ordering::Relaxed);
+        if handles > isize::MAX.unsigned_abs() {
+            std::process::abort();
+        }
         Owned {
-            shared: ManuallyDrop::new(Arc::clone(&self.shared)),
+            block: self.block,
+            _owns: PhantomData,
         }
     }
 }
@@ -115,12 +192,45 @@ where
     /// The last handle frees the shared block, then the members, and only then releases their
     /// owner, which accounts for both.
     fn drop(&mut self) {
-        // SAFETY: `shared` is taken once, here, and the handle is never used again.
-        let shared = unsafe { ManuallyDrop::take(&mut self.shared) };
-        if let Some(OwnedMembers { members, owner }) = Arc::into_inner(shared) {
-            drop(members);
-            owner.release();
+        if self.shared().handles.fetch_sub(1, Ordering::Release) != 1 {
+            return;
         }
+        // Every other handle's reads of the block happen before it is taken apart.
+        fence(Ordering::Acquire);
+        // SAFETY: this was the last handle: the block is initialized and nothing else reads it.
+        // It is read out once, then freed with the layout it was allocated with, and never
+        // touched again.
+        let OwnedMembers { members, owner, .. } = unsafe { self.block.as_ptr().read() };
+        // SAFETY: as above.
+        unsafe { std::alloc::dealloc(self.block.as_ptr().cast(), Layout::new::<OwnedMembers<NID, N>>()) };
+        drop(members);
+        owner.release();
+    }
+}
+
+/// A membership handed back by [`Membership::with_owner`] with the owner it was to be given,
+/// unreleased: the allocator refused the block they move into, and nothing was allocated. The
+/// caller frees the membership before releasing the owner, as an owned membership's last clone
+/// would.
+#[since(version = "0.10.0")]
+pub struct OwnerRefused<NID, N>
+where
+    NID: NodeId,
+    N: Node,
+{
+    /// The membership, with no owner.
+    pub membership: Membership<NID, N>,
+    /// The owner it was to be given, not released.
+    pub owner: Box<dyn MembershipOwner>,
+}
+
+impl<NID, N> fmt::Debug for OwnerRefused<NID, N>
+where
+    NID: NodeId,
+    N: Node,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OwnerRefused").field("membership", &self.membership).finish_non_exhaustive()
     }
 }
 
@@ -302,20 +412,29 @@ where
     /// and `owner` is released at once.
     ///
     /// The owner accounts for the members' memory, the block they move into
-    /// ([`Self::OWNED_BLOCK_BYTES`]) and its own box. OpenRaft holds the clones it keeps by value,
-    /// never in an `Arc` of its own, so nothing it allocates around them outlives the owner.
-    pub fn with_owner(self, owner: Box<dyn MembershipOwner>) -> Self {
+    /// ([`Self::OWNED_BLOCK_BYTES`]) and its own box, all charged before it is made, so the block
+    /// is charged before it is allocated. OpenRaft holds the clones it keeps by value, never in an
+    /// `Arc` of its own, so nothing it allocates around them outlives the owner.
+    ///
+    /// The block is allocated fallibly: refused by the allocator, nothing is allocated, and the
+    /// membership and the owner are handed back as they were ([`OwnerRefused`]), the owner not
+    /// released.
+    pub fn with_owner(self, owner: Box<dyn MembershipOwner>) -> Result<Self, OwnerRefused<NID, N>> {
         match self.repr {
-            Repr::Plain(members) => Membership {
-                repr: Repr::Owned(Owned {
-                    shared: ManuallyDrop::new(Arc::new(OwnedMembers { members, owner })),
+            Repr::Plain(members) => match Owned::try_new(members, owner) {
+                Ok(owned) => Ok(Membership {
+                    repr: Repr::Owned(owned),
+                }),
+                Err((members, owner)) => Err(OwnerRefused {
+                    membership: Membership::plain(members),
+                    owner,
                 }),
             },
             Repr::Owned(owned) => {
                 owner.release();
-                Membership {
+                Ok(Membership {
                     repr: Repr::Owned(owned),
-                }
+                })
             }
         }
     }
@@ -342,9 +461,9 @@ where
     }
 
     /// The bytes [`Self::with_owner`] allocates for the block an owned membership's members and
-    /// owner share: an `Arc`'s strong and weak counts, then the members and the owner's box,
-    /// padded to the block's alignment.
-    pub const OWNED_BLOCK_BYTES: usize = arc_block_bytes::<OwnedMembers<NID, N>>();
+    /// owner share: the count of its handles, the members and the owner's box, padded to the
+    /// block's alignment, exactly the layout it is allocated with.
+    pub const OWNED_BLOCK_BYTES: usize = size_of::<OwnedMembers<NID, N>>();
 
     /// Returns true if this membership is in joint consensus, i.e. it has more than one config.
     pub(crate) fn is_joint(&self) -> bool {
@@ -428,7 +547,7 @@ where
     pub(crate) fn members(&self) -> &Members<NID, N> {
         match &self.repr {
             Repr::Plain(members) => members,
-            Repr::Owned(owned) => &owned.shared.members,
+            Repr::Owned(owned) => &owned.shared().members,
         }
     }
 
@@ -436,7 +555,7 @@ where
     fn into_members(self) -> Members<NID, N> {
         match self.repr {
             Repr::Plain(members) => members,
-            Repr::Owned(owned) => owned.shared.members.clone(),
+            Repr::Owned(owned) => owned.shared().members.clone(),
         }
     }
 
@@ -733,7 +852,7 @@ mod tests {
 
         let released = Arc::new(AtomicUsize::new(0));
         let plain = Membership::<u64, ()>::new_unchecked(vec![btreeset! {1,2}], btreemap! {1=>(),2=>()});
-        let owned = plain.clone().with_owner(Box::new(Counted(released.clone())));
+        let owned = plain.clone().with_owner(Box::new(Counted(released.clone()))).expect("the block is given");
         assert!(owned.is_owned());
         assert_eq!(owned, plain);
 
@@ -745,6 +864,54 @@ mod tests {
         drop(owned);
         assert_eq!(released.load(Ordering::SeqCst), 0);
         drop(shared);
+        assert_eq!(released.load(Ordering::SeqCst), 1);
+    }
+
+    /// The block an owner's members move into is allocated fallibly: refused, nothing is
+    /// allocated and the membership and its owner are handed back, the owner unreleased, to be
+    /// given again.
+    #[test]
+    fn test_membership_owner_refused_block_hands_both_back() {
+        use std::sync::Arc;
+        use std::sync::atomic::AtomicUsize;
+        use std::sync::atomic::Ordering;
+
+        use crate::metered::metered;
+        use crate::metered::refusing;
+
+        struct Counted(Arc<AtomicUsize>);
+        impl crate::MembershipOwner for Counted {
+            fn release(self: Box<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let released = Arc::new(AtomicUsize::new(0));
+        let plain = Membership::<u64, ()>::new_unchecked(vec![btreeset! {1,2}], btreemap! {1=>(),2=>()});
+        let owner: Box<dyn crate::MembershipOwner> = Box::new(Counted(released.clone()));
+        let candidate = plain.clone();
+
+        let ((given, refused), meter) = metered(|| refusing(|| candidate.with_owner(owner)));
+        assert_eq!(refused, 1, "only the block is asked for");
+        assert_eq!(meter.allocated, 0, "a refused block allocates nothing");
+        assert_eq!(meter.kept, 0, "a refused block frees nothing");
+        let Err(OwnerRefused { membership, owner }) = given else {
+            panic!("the allocator refused the block");
+        };
+        assert!(!membership.is_owned());
+        assert_eq!(membership, plain);
+        assert_eq!(
+            released.load(Ordering::SeqCst),
+            0,
+            "a refused owner is handed back unreleased"
+        );
+
+        let (owned, meter) = metered(|| membership.with_owner(owner));
+        let owned = owned.expect("the block is given");
+        assert_eq!(meter.allocated, Membership::<u64, ()>::OWNED_BLOCK_BYTES);
+        assert!(owned.is_owned());
+        assert_eq!(owned, plain);
+        drop(owned);
         assert_eq!(released.load(Ordering::SeqCst), 1);
     }
 
